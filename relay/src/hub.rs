@@ -20,6 +20,15 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 const PING_THRESHOLD: Duration = Duration::from_secs(60);
 const DEAD_THRESHOLD: Duration = Duration::from_secs(90);
 
+/// Session token TTL for connection resumption.
+const SESSION_TOKEN_TTL: Duration = Duration::from_secs(300); // 5 minutes
+
+/// Stored session for connection resumption.
+struct StoredSession {
+    agent_id: String,
+    created_at: Instant,
+}
+
 /// A buffered message waiting for delivery.
 struct BufferedMessage {
     json: String,
@@ -40,6 +49,8 @@ pub struct Hub {
     buffers: RwLock<HashMap<String, VecDeque<BufferedMessage>>>,
     /// Set of revoked agent IDs. Revoked agents cannot authenticate or receive messages.
     revoked: RwLock<HashSet<String>>,
+    /// Session tokens for connection resumption: token → StoredSession.
+    session_tokens: RwLock<HashMap<String, StoredSession>>,
     /// Counters for metrics.
     pub messages_routed: AtomicU64,
     pub messages_buffered: AtomicU64,
@@ -64,6 +75,7 @@ impl Hub {
             agents: RwLock::new(HashMap::new()),
             buffers: RwLock::new(HashMap::new()),
             revoked: RwLock::new(HashSet::new()),
+            session_tokens: RwLock::new(HashMap::new()),
             messages_routed: AtomicU64::new(0),
             messages_buffered: AtomicU64::new(0),
             messages_dropped: AtomicU64::new(0),
@@ -271,6 +283,32 @@ impl Hub {
     /// List connected agent IDs.
     pub async fn connected_agent_ids(&self) -> Vec<String> {
         self.agents.read().await.keys().cloned().collect()
+    }
+
+    /// Issue a session token for an authenticated agent.
+    /// Returns the token string to send in AuthResult.
+    pub async fn issue_session_token(&self, agent_id: &str) -> String {
+        let token = uuid::Uuid::new_v4().to_string();
+        let mut tokens = self.session_tokens.write().await;
+        tokens.insert(
+            token.clone(),
+            StoredSession {
+                agent_id: agent_id.to_string(),
+                created_at: Instant::now(),
+            },
+        );
+        token
+    }
+
+    /// Validate a session token for resumption.
+    /// Returns the agent_id if the token is valid and not expired.
+    pub async fn validate_session_token(&self, token: &str) -> Option<String> {
+        let tokens = self.session_tokens.read().await;
+        let session = tokens.get(token)?;
+        if Instant::now().duration_since(session.created_at) > SESSION_TOKEN_TTL {
+            return None;
+        }
+        Some(session.agent_id.clone())
     }
 
     /// Background reaper: sends Ping to idle agents, removes dead ones.

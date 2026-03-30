@@ -44,6 +44,12 @@ pub enum MessageType {
     Control,
     /// Noise Protocol handshake message (E2E encryption setup).
     Handshake,
+    /// Request that expects a streaming response (multiple StreamChunk + StreamEnd).
+    StreamRequest,
+    /// One chunk of a streaming response. `in_reply_to` ties it to the original request.
+    StreamChunk,
+    /// Signals the end of a streaming response.
+    StreamEnd,
 }
 
 /// The part of the envelope that gets signed.
@@ -190,6 +196,18 @@ pub struct AuthResult {
     pub success: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Session token for connection resumption (issued on successful auth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
+}
+
+/// Resume a previously authenticated session without full challenge-response.
+/// Sent instead of AuthHello when the agent has a valid session token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthResume {
+    pub agent_id: AgentId,
+    /// The session token received from a previous AuthResult.
+    pub session_token: String,
 }
 
 /// A signed key revocation declaration.

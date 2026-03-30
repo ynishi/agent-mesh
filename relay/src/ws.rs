@@ -7,7 +7,9 @@ use axum::response::IntoResponse;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use futures_util::SinkExt;
 use mesh_proto::identity::AgentId;
-use mesh_proto::message::{AuthChallenge, AuthHello, AuthResponse, AuthResult, MeshEnvelope};
+use mesh_proto::message::{
+    AuthChallenge, AuthHello, AuthResponse, AuthResult, AuthResume, MeshEnvelope,
+};
 
 use crate::hub::Hub;
 
@@ -18,8 +20,8 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(hub): State<Arc<Hub>>) -> im
 async fn handle_connection(socket: WebSocket, hub: Arc<Hub>) {
     let (mut sink, mut stream) = socket.split();
 
-    // Challenge-Response auth.
-    let agent_id = match challenge_response_auth(&mut sink, &mut stream).await {
+    // Authenticate: either full challenge-response or session resumption.
+    let agent_id = match authenticate(&mut sink, &mut stream, &hub).await {
         Some(id) => {
             hub.auth_successes.fetch_add(1, Ordering::Relaxed);
             id
@@ -70,19 +72,78 @@ async fn handle_connection(socket: WebSocket, hub: Arc<Hub>) {
     hub.unregister(&agent_id).await;
 }
 
-/// 4-step challenge-response authentication.
+/// Top-level auth: tries session resumption first, falls back to full challenge-response.
+async fn authenticate(
+    sink: &mut SplitSink<WebSocket, Message>,
+    stream: &mut SplitStream<WebSocket>,
+    hub: &Arc<Hub>,
+) -> Option<AgentId> {
+    // Read the first message — could be AuthHello or AuthResume.
+    let first_text = match stream.next().await {
+        Some(Ok(Message::Text(text))) => text,
+        _ => return None,
+    };
+
+    // Try AuthResume first.
+    if let Ok(resume) = serde_json::from_str::<AuthResume>(&first_text) {
+        return handle_resume(sink, hub, &resume).await;
+    }
+
+    // Otherwise, treat as AuthHello and proceed with full auth.
+    let hello: AuthHello = serde_json::from_str(&first_text).ok()?;
+    challenge_response_auth(sink, stream, hub, hello).await
+}
+
+/// Handle session resumption via token.
+async fn handle_resume(
+    sink: &mut SplitSink<WebSocket, Message>,
+    hub: &Arc<Hub>,
+    resume: &AuthResume,
+) -> Option<AgentId> {
+    match hub.validate_session_token(&resume.session_token).await {
+        Some(stored_agent_id) if stored_agent_id == resume.agent_id.as_str() => {
+            let token = hub.issue_session_token(resume.agent_id.as_str()).await;
+            let _ = send_json(
+                sink,
+                &AuthResult {
+                    success: true,
+                    error: None,
+                    session_token: Some(token),
+                },
+            )
+            .await;
+            tracing::info!(
+                agent = resume.agent_id.as_str(),
+                "auth: session resumed via token"
+            );
+            Some(resume.agent_id.clone())
+        }
+        _ => {
+            let _ = send_json(
+                sink,
+                &AuthResult {
+                    success: false,
+                    error: Some("invalid or expired session token".into()),
+                    session_token: None,
+                },
+            )
+            .await;
+            tracing::warn!(
+                agent = resume.agent_id.as_str(),
+                "auth: session resume failed"
+            );
+            None
+        }
+    }
+}
+
+/// 4-step challenge-response authentication (hello already received).
 async fn challenge_response_auth(
     sink: &mut SplitSink<WebSocket, Message>,
     stream: &mut SplitStream<WebSocket>,
+    hub: &Arc<Hub>,
+    hello: AuthHello,
 ) -> Option<AgentId> {
-    // Step 1: Receive AuthHello from agent.
-    let hello: AuthHello = match receive_json(stream).await {
-        Some(h) => h,
-        None => {
-            tracing::warn!("auth: failed to receive AuthHello");
-            return None;
-        }
-    };
     let agent_id = hello.agent_id;
     tracing::debug!(agent = agent_id.as_str(), "auth: received hello");
 
@@ -110,6 +171,7 @@ async fn challenge_response_auth(
                 &AuthResult {
                     success: false,
                     error: Some("no response".into()),
+                    session_token: None,
                 },
             )
             .await;
@@ -125,6 +187,7 @@ async fn challenge_response_auth(
             &AuthResult {
                 success: false,
                 error: Some("agent_id mismatch".into()),
+                session_token: None,
             },
         )
         .await;
@@ -134,11 +197,13 @@ async fn challenge_response_auth(
     // Verify the signature over the nonce.
     match verify_nonce_signature(&agent_id, &nonce, &response.signature) {
         Ok(()) => {
+            let token = hub.issue_session_token(agent_id.as_str()).await;
             let _ = send_json(
                 sink,
                 &AuthResult {
                     success: true,
                     error: None,
+                    session_token: Some(token),
                 },
             )
             .await;
@@ -155,6 +220,7 @@ async fn challenge_response_auth(
                 &AuthResult {
                     success: false,
                     error: Some(e),
+                    session_token: None,
                 },
             )
             .await;

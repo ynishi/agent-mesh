@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,27 +8,41 @@ use futures_util::SinkExt;
 use mesh_proto::acl::AclPolicy;
 use mesh_proto::identity::{AgentId, AgentKeypair};
 use mesh_proto::message::{
-    AuthChallenge, AuthHello, AuthResponse, AuthResult, MeshEnvelope, MessageType,
+    AuthChallenge, AuthHello, AuthResponse, AuthResult, AuthResume, MeshEnvelope, MessageType,
 };
 use mesh_proto::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use crate::error::SdkError;
 
 type PendingMap = Arc<Mutex<HashMap<Uuid, oneshot::Sender<MeshEnvelope>>>>;
+type StreamPendingMap =
+    Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<Result<serde_json::Value, SdkError>>>>>;
 type SessionMap = Arc<Mutex<HashMap<String, NoiseTransport>>>;
 type WsSink = futures_util::stream::SplitSink<WsStream, Message>;
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// A stream of JSON values yielded by a streaming handler.
+pub type ValueStream =
+    Pin<Box<dyn futures_util::Stream<Item = serde_json::Value> + Send + 'static>>;
+
 /// Handler for incoming requests.
 ///
 /// Implement this trait to define how the agent responds to requests.
+/// Override `handle_stream` to support streaming responses.
 #[async_trait::async_trait]
 pub trait RequestHandler: Send + Sync + 'static {
     async fn handle(&self, from: &AgentId, payload: &serde_json::Value) -> serde_json::Value;
+
+    /// Handle a streaming request. Returns a stream of JSON chunks.
+    /// Default: wraps `handle()` as a single-item stream.
+    async fn handle_stream(&self, from: &AgentId, payload: &serde_json::Value) -> ValueStream {
+        let val = self.handle(from, payload).await;
+        Box::pin(futures_util::stream::once(async move { val }))
+    }
 }
 
 /// Async function handler — convenience wrapper.
@@ -51,9 +66,11 @@ pub struct MeshAgent {
     keypair: Arc<AgentKeypair>,
     noise_keypair: Arc<NoiseKeypair>,
     pending: PendingMap,
+    stream_pending: StreamPendingMap,
     sink: Arc<Mutex<WsSink>>,
     sessions: SessionMap,
     acl: Arc<RwLock<AclPolicy>>,
+    session_token: Arc<Mutex<Option<String>>>,
 }
 
 impl MeshAgent {
@@ -108,34 +125,42 @@ impl MeshAgent {
             ));
         }
 
+        let session_token = Arc::new(Mutex::new(result.session_token));
+
         let noise_keypair =
             Arc::new(NoiseKeypair::generate().map_err(|e| SdkError::Protocol(e.to_string()))?);
         let keypair = Arc::new(keypair);
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let stream_pending: StreamPendingMap = Arc::new(Mutex::new(HashMap::new()));
         let sink = Arc::new(Mutex::new(sink));
         let sessions: SessionMap = Arc::new(Mutex::new(HashMap::new()));
         let acl = Arc::new(RwLock::new(acl));
 
-        // Spawn the bidirectional reader loop.
-        tokio::spawn(agent_reader_loop(
+        // Spawn the bidirectional reader loop with auto-reconnect.
+        tokio::spawn(agent_reader_loop_with_reconnect(
+            Arc::clone(&keypair),
+            relay_url.to_string(),
             stream,
-            Arc::new(keypair.as_ref().clone_inner()),
             Arc::clone(&noise_keypair),
             Arc::clone(&pending),
+            Arc::clone(&stream_pending),
             Arc::clone(&sink),
             Arc::clone(&sessions),
             Arc::clone(&acl),
             handler,
+            Arc::clone(&session_token),
         ));
 
         Ok(Self {
             keypair,
             noise_keypair,
             pending,
+            stream_pending,
             sink,
             sessions,
             acl,
+            session_token,
         })
     }
 
@@ -209,6 +234,55 @@ impl MeshAgent {
         } else {
             Ok(response.payload)
         }
+    }
+
+    /// Send an encrypted request and receive a streaming response.
+    pub async fn request_stream(
+        &self,
+        target: &AgentId,
+        payload: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<crate::StreamReceiver, SdkError> {
+        self.ensure_session(target, timeout).await?;
+
+        let plaintext =
+            serde_json::to_vec(&payload).map_err(|e| SdkError::Protocol(e.to_string()))?;
+        let ciphertext_b64 = {
+            let mut sessions = self.sessions.lock().await;
+            let transport = sessions.get_mut(target.as_str()).ok_or_else(|| {
+                SdkError::Protocol("noise session missing after handshake".into())
+            })?;
+            transport
+                .encrypt(&plaintext)
+                .map_err(|e| SdkError::Protocol(format!("encrypt: {e}")))?
+        };
+
+        let envelope = MeshEnvelope::new_encrypted(
+            &self.keypair,
+            target.clone(),
+            MessageType::StreamRequest,
+            None,
+            serde_json::Value::String(ciphertext_b64),
+        )
+        .map_err(|e| SdkError::Protocol(e.to_string()))?;
+
+        let msg_id = envelope.id;
+        let (tx, rx) = mpsc::unbounded_channel();
+        {
+            let mut sp = self.stream_pending.lock().await;
+            sp.insert(msg_id, tx);
+        }
+
+        let json =
+            serde_json::to_string(&envelope).map_err(|e| SdkError::Protocol(e.to_string()))?;
+        {
+            let mut sink = self.sink.lock().await;
+            sink.send(Message::text(json))
+                .await
+                .map_err(|e| SdkError::Send(e.to_string()))?;
+        }
+
+        Ok(crate::StreamReceiver::new(rx))
     }
 
     pub fn agent_id(&self) -> AgentId {
@@ -348,12 +422,120 @@ enum PeerNoise {
 /// 1. Response matching (in_reply_to → pending)
 /// 2. Noise handshake (responder side)
 /// 3. Incoming requests (ACL check → handler → response)
+/// Agent reader loop wrapper with auto-reconnect.
+#[allow(clippy::too_many_arguments)]
+async fn agent_reader_loop_with_reconnect(
+    keypair: Arc<AgentKeypair>,
+    relay_url: String,
+    stream: futures_util::stream::SplitStream<WsStream>,
+    noise_keypair: Arc<NoiseKeypair>,
+    pending: PendingMap,
+    stream_pending: StreamPendingMap,
+    sink: Arc<Mutex<WsSink>>,
+    sessions: SessionMap,
+    acl: Arc<RwLock<AclPolicy>>,
+    handler: Arc<dyn RequestHandler>,
+    session_token: Arc<Mutex<Option<String>>>,
+) {
+    // Run initial reader loop.
+    agent_reader_loop(
+        stream,
+        Arc::new(keypair.as_ref().clone_inner()),
+        Arc::clone(&noise_keypair),
+        Arc::clone(&pending),
+        Arc::clone(&stream_pending),
+        Arc::clone(&sink),
+        Arc::clone(&sessions),
+        Arc::clone(&acl),
+        Arc::clone(&handler),
+    )
+    .await;
+
+    // Attempt session resumption.
+    let token = {
+        let guard = session_token.lock().await;
+        guard.clone()
+    };
+
+    if let Some(token) = token {
+        tracing::info!("agent connection lost, attempting session resumption");
+        match attempt_agent_resume(&keypair, &relay_url, &token).await {
+            Ok((new_stream, new_sink_inner, new_token)) => {
+                *sink.lock().await = new_sink_inner;
+                *session_token.lock().await = Some(new_token);
+                sessions.lock().await.clear();
+
+                tracing::info!("agent session resumed successfully");
+
+                agent_reader_loop(
+                    new_stream,
+                    Arc::new(keypair.as_ref().clone_inner()),
+                    noise_keypair,
+                    pending,
+                    stream_pending,
+                    sink,
+                    sessions,
+                    acl,
+                    handler,
+                )
+                .await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "agent session resume failed");
+            }
+        }
+    }
+}
+
+/// Attempt session resumption for a MeshAgent.
+async fn attempt_agent_resume(
+    keypair: &AgentKeypair,
+    relay_url: &str,
+    token: &str,
+) -> Result<
+    (
+        futures_util::stream::SplitStream<WsStream>,
+        futures_util::stream::SplitSink<WsStream, Message>,
+        String,
+    ),
+    SdkError,
+> {
+    let (ws_stream, _) = tokio_tungstenite::connect_async(relay_url)
+        .await
+        .map_err(|e| SdkError::Connection(e.to_string()))?;
+
+    let (mut sink, mut stream) = ws_stream.split();
+
+    let resume = AuthResume {
+        agent_id: keypair.agent_id(),
+        session_token: token.to_string(),
+    };
+    let json = serde_json::to_string(&resume).map_err(|e| SdkError::Protocol(e.to_string()))?;
+    sink.send(Message::text(json))
+        .await
+        .map_err(|e| SdkError::Auth(e.to_string()))?;
+
+    let result: AuthResult = receive_ws_json(&mut stream)
+        .await
+        .ok_or_else(|| SdkError::Auth("no auth result on resume".into()))?;
+
+    if !result.success {
+        return Err(SdkError::Auth(
+            result.error.unwrap_or_else(|| "resume failed".into()),
+        ));
+    }
+
+    let new_token = result.session_token.unwrap_or_default();
+    Ok((stream, sink, new_token))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn agent_reader_loop(
     mut stream: futures_util::stream::SplitStream<WsStream>,
     keypair: Arc<AgentKeypair>,
     noise_keypair: Arc<NoiseKeypair>,
     pending: PendingMap,
+    stream_pending: StreamPendingMap,
     sink: Arc<Mutex<WsSink>>,
     sessions: SessionMap,
     acl: Arc<RwLock<AclPolicy>>,
@@ -378,6 +560,53 @@ async fn agent_reader_loop(
 
                 // If it's a response to a pending request, deliver it.
                 if let Some(reply_to) = envelope.in_reply_to {
+                    // StreamChunk: forward to stream receiver.
+                    if envelope.msg_type == MessageType::StreamChunk {
+                        let sp = stream_pending.lock().await;
+                        if let Some(tx) = sp.get(&reply_to) {
+                            let payload = if envelope.encrypted {
+                                match decrypt_in_reader(&envelope, &sessions).await {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        let _ = tx.send(Err(e));
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                envelope.payload
+                            };
+                            let _ = tx.send(Ok(payload));
+                        }
+                        continue;
+                    }
+
+                    // StreamEnd: close stream channel.
+                    if envelope.msg_type == MessageType::StreamEnd {
+                        let mut sp = stream_pending.lock().await;
+                        sp.remove(&reply_to);
+                        continue;
+                    }
+
+                    // Error for stream: send error and close.
+                    if envelope.msg_type == MessageType::Error {
+                        let mut sp = stream_pending.lock().await;
+                        if let Some(tx) = sp.remove(&reply_to) {
+                            let err_msg = if envelope.encrypted {
+                                match decrypt_in_reader(&envelope, &sessions).await {
+                                    Ok(v) => v.to_string(),
+                                    Err(e) => e.to_string(),
+                                }
+                            } else {
+                                envelope.payload.to_string()
+                            };
+                            let _ = tx.send(Err(SdkError::Remote(err_msg)));
+                            continue;
+                        }
+                        drop(sp);
+                        // Fall through to regular pending.
+                    }
+
+                    // Regular response/handshake.
                     let mut p = pending.lock().await;
                     if let Some(tx) = p.remove(&reply_to) {
                         let _ = tx.send(envelope);
@@ -407,16 +636,13 @@ async fn agent_reader_loop(
                     let mut sess = sessions.lock().await;
                     let transport = match sess.get_mut(&peer_key) {
                         Some(t) => t,
-                        None => {
-                            // Check handshake_states for established sessions.
-                            match handshake_states.get_mut(&peer_key) {
-                                Some(PeerNoise::Established(t)) => t,
-                                _ => {
-                                    tracing::warn!("encrypted msg but no session for {peer_key}");
-                                    continue;
-                                }
+                        None => match handshake_states.get_mut(&peer_key) {
+                            Some(PeerNoise::Established(t)) => t,
+                            _ => {
+                                tracing::warn!("encrypted msg but no session for {peer_key}");
+                                continue;
                             }
-                        }
+                        },
                     };
                     let ct = match envelope.payload.as_str() {
                         Some(s) => s,
@@ -470,10 +696,41 @@ async fn agent_reader_loop(
                     continue;
                 }
 
-                // Call handler.
-                let response_payload = handler.handle(&envelope.from, &payload).await;
+                // StreamRequest: call handle_stream, send chunks.
+                if envelope.msg_type == MessageType::StreamRequest {
+                    let mut val_stream = handler.handle_stream(&envelope.from, &payload).await;
+                    while let Some(chunk) = val_stream.next().await {
+                        let _ = send_response(
+                            &keypair,
+                            &sink,
+                            &sessions,
+                            &peer_key,
+                            envelope.from.clone(),
+                            MessageType::StreamChunk,
+                            Some(envelope.id),
+                            chunk,
+                            envelope.encrypted,
+                        )
+                        .await;
+                    }
+                    // Send StreamEnd.
+                    let _ = send_response(
+                        &keypair,
+                        &sink,
+                        &sessions,
+                        &peer_key,
+                        envelope.from,
+                        MessageType::StreamEnd,
+                        Some(envelope.id),
+                        serde_json::Value::Null,
+                        envelope.encrypted,
+                    )
+                    .await;
+                    continue;
+                }
 
-                // Send response.
+                // Regular Request: call handler, send single response.
+                let response_payload = handler.handle(&envelope.from, &payload).await;
                 let _ = send_response(
                     &keypair,
                     &sink,
@@ -495,6 +752,25 @@ async fn agent_reader_loop(
             _ => {}
         }
     }
+}
+
+/// Decrypt an envelope's payload using the Noise session for the sender (agent reader context).
+async fn decrypt_in_reader(
+    envelope: &MeshEnvelope,
+    sessions: &SessionMap,
+) -> Result<serde_json::Value, SdkError> {
+    let ct = envelope
+        .payload
+        .as_str()
+        .ok_or_else(|| SdkError::Protocol("encrypted payload not a string".into()))?;
+    let mut sess = sessions.lock().await;
+    let transport = sess
+        .get_mut(envelope.from.as_str())
+        .ok_or_else(|| SdkError::Protocol("no noise session for decrypt".into()))?;
+    let pt = transport
+        .decrypt(ct)
+        .map_err(|e| SdkError::Protocol(format!("decrypt: {e}")))?;
+    serde_json::from_slice(&pt).map_err(|e| SdkError::Protocol(e.to_string()))
 }
 
 async fn handle_handshake(
