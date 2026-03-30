@@ -136,10 +136,7 @@ async fn main() -> Result<()> {
         )
         .await
         .map_err(|e| anyhow::anyhow!("request: {e}"))?;
-    assert_eq!(
-        result.get("agent").and_then(|v| v.as_str()),
-        Some("bob")
-    );
+    assert_eq!(result.get("agent").and_then(|v| v.as_str()), Some("bob"));
     assert_eq!(
         result.get("capability").and_then(|v| v.as_str()),
         Some("scheduling")
@@ -160,10 +157,7 @@ async fn main() -> Result<()> {
         )
         .await
         .map_err(|e| anyhow::anyhow!("request2: {e}"))?;
-    assert_eq!(
-        result2.get("agent").and_then(|v| v.as_str()),
-        Some("bob")
-    );
+    assert_eq!(result2.get("agent").and_then(|v| v.as_str()), Some("bob"));
     println!("[PASS] Session reuse works\n");
 
     // --- Test 5: ACL Denial (admin capability, encrypted channel) ---
