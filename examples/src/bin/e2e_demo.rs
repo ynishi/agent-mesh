@@ -5,7 +5,7 @@
 //!
 //! Usage: cargo run -p examples --bin e2e-demo
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ use anyhow::Result;
 use mesh_proto::acl::{AclPolicy, AclRule};
 use mesh_proto::agent_card::{AgentCardRegistration, Capability};
 use mesh_proto::identity::AgentKeypair;
-use mesh_proto::message::{MeshEnvelope, MessageType};
+use mesh_proto::message::{KeyRevocation, MeshEnvelope, MessageType};
 use mesh_proto::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -35,8 +35,9 @@ async fn main() -> Result<()> {
     println!("[setup] Alice ID: {alice_id}");
 
     // --- Start Relay ---
-    let relay_addr = start_relay().await?;
+    let (relay_addr, relay_hub) = start_relay().await?;
     let relay_ws_url = format!("ws://{relay_addr}/ws");
+    let relay_http_url = format!("http://{relay_addr}");
     println!("[relay] listening on {relay_addr}");
 
     // --- Start Registry ---
@@ -261,25 +262,107 @@ async fn main() -> Result<()> {
     assert!(envelope.verify().is_err());
     println!("[PASS] Tampered envelope detected\n");
 
+    // --- Test 8: Key Revocation ---
+    println!("--- Test 8: Key revocation blocks agent ---");
+    {
+        // Create a fresh agent and connect it.
+        let victim_kp = AgentKeypair::generate();
+        let victim_id = victim_kp.agent_id();
+        let victim_secret = *victim_kp.secret_bytes();
+        let victim_id_for_acl = victim_id.clone();
+        let attacker_kp = AgentKeypair::generate();
+        let attacker_id = attacker_kp.agent_id();
+        let relay_url_v = relay_ws_url.clone();
+        let mock_url_v = format!("http://{mock_addr}");
+
+        // Start victim meshd.
+        tokio::spawn(async move {
+            run_meshd(
+                &victim_secret,
+                &relay_url_v,
+                &mock_url_v,
+                &attacker_id,
+                &victim_id_for_acl,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Revoke the victim's key via POST /revoke.
+        let revocation = KeyRevocation::new(&victim_kp, Some("compromised".into()));
+        let resp = client
+            .post(format!("{relay_http_url}/revoke"))
+            .json(&revocation)
+            .send()
+            .await?;
+        assert!(
+            resp.status().is_success(),
+            "revocation failed: {}",
+            resp.status()
+        );
+        println!("[PASS] Key revocation accepted");
+
+        // Verify: the in-process hub has the agent revoked.
+        assert!(
+            relay_hub.is_revoked(victim_id.as_str()).await,
+            "agent should be in revoked set"
+        );
+        println!("[PASS] Agent is in revoked set");
+
+        // Verify: attempting to send to revoked agent fails (route blocked).
+        // Connect attacker and try to send plaintext to victim.
+        let attacker_mc = mesh_sdk::MeshClient::connect(attacker_kp, &relay_ws_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let req_result = attacker_mc
+            .request_plaintext(
+                &victim_id,
+                serde_json::json!({"capability": "scheduling", "action": "list"}),
+                Duration::from_secs(3),
+            )
+            .await;
+        assert!(req_result.is_err(), "request to revoked agent should fail");
+        println!("[PASS] Request to revoked agent blocked\n");
+    }
+
     println!("=== All tests passed! ===");
     Ok(())
 }
 
 // --- Component starters ---
 
-async fn start_relay() -> Result<SocketAddr> {
-    use axum::{extract::WebSocketUpgrade, routing::get, Router};
+async fn start_relay() -> Result<(SocketAddr, Arc<InProcessHub>)> {
+    use axum::{extract::WebSocketUpgrade, routing::get, routing::post, Json, Router};
     use std::sync::Arc;
 
     let hub = Arc::new(InProcessHub::new());
-    let hub2 = Arc::clone(&hub);
+    let hub_ws = Arc::clone(&hub);
+    let hub_ret = Arc::clone(&hub);
 
     let app = Router::new()
         .route(
             "/ws",
             get(move |ws: WebSocketUpgrade| {
-                let hub = Arc::clone(&hub2);
+                let hub = Arc::clone(&hub_ws);
                 async move { ws.on_upgrade(move |socket| in_process_relay_handle(socket, hub)) }
+            }),
+        )
+        .route(
+            "/revoke",
+            post({
+                let hub = Arc::clone(&hub);
+                move |Json(rev): Json<KeyRevocation>| {
+                    let hub = Arc::clone(&hub);
+                    async move {
+                        if rev.verify().is_ok() {
+                            hub.revoke(rev.agent_id.as_str()).await;
+                            "revoked"
+                        } else {
+                            "invalid signature"
+                        }
+                    }
+                }
             }),
         )
         .route("/health", get(|| async { "ok" }));
@@ -287,7 +370,7 @@ async fn start_relay() -> Result<SocketAddr> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     tokio::spawn(async move { axum::serve(listener, app).await });
-    Ok(addr)
+    Ok((addr, hub_ret))
 }
 
 async fn start_registry() -> Result<SocketAddr> {
@@ -676,6 +759,7 @@ use std::collections::VecDeque;
 struct InProcessHub {
     agents: RwLock<HashMap<String, Arc<Mutex<WsSink>>>>,
     buffers: RwLock<HashMap<String, VecDeque<String>>>,
+    revoked: RwLock<HashSet<String>>,
 }
 
 impl InProcessHub {
@@ -683,7 +767,20 @@ impl InProcessHub {
         Self {
             agents: RwLock::new(HashMap::new()),
             buffers: RwLock::new(HashMap::new()),
+            revoked: RwLock::new(HashSet::new()),
         }
+    }
+
+    async fn is_revoked(&self, id: &str) -> bool {
+        self.revoked.read().await.contains(id)
+    }
+
+    async fn revoke(&self, id: &str) {
+        self.revoked.write().await.insert(id.to_string());
+        // Disconnect if online.
+        self.agents.write().await.remove(id);
+        // Drop buffers.
+        self.buffers.write().await.remove(id);
     }
 
     async fn register(&self, id: &str, sink: WsSink) {
@@ -806,6 +903,13 @@ async fn in_process_relay_handle(socket: WebSocket, hub: Arc<InProcessHub>) {
     }
 
     let id_str = agent_id.as_str().to_string();
+
+    // Check revocation before registration.
+    if hub.is_revoked(&id_str).await {
+        let _ = sink.send(AxumMsg::Close(None)).await;
+        return;
+    }
+
     hub.register(&id_str, sink).await;
 
     while let Some(msg) = stream.next().await {
@@ -816,6 +920,14 @@ async fn in_process_relay_handle(socket: WebSocket, hub: Arc<InProcessHub>) {
                         continue;
                     }
                     if env.verify().is_err() {
+                        continue;
+                    }
+                    // Check sender revocation on route.
+                    if hub.is_revoked(env.from.as_str()).await {
+                        continue;
+                    }
+                    // Check target revocation on route.
+                    if hub.is_revoked(env.to.as_str()).await {
                         continue;
                     }
                     hub.route(env.to.as_str(), &text).await;

@@ -26,6 +26,16 @@ async fn handle_connection(socket: WebSocket, hub: Arc<Hub>) {
         }
     };
 
+    // Check if agent is revoked.
+    if hub.is_revoked(&agent_id).await {
+        tracing::warn!(
+            agent = agent_id.as_str(),
+            "revoked agent attempted to connect"
+        );
+        let _ = sink.send(axum::extract::ws::Message::Close(None)).await;
+        return;
+    }
+
     // Register with hub.
     hub.register(&agent_id, sink).await;
 

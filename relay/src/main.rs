@@ -2,7 +2,12 @@ mod hub;
 mod ws;
 
 use anyhow::Result;
-use axum::{routing::get, Router};
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use mesh_proto::message::KeyRevocation;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -22,6 +27,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/health", get(health))
+        .route("/revoke", post(revoke_handler))
         .layer(TraceLayer::new_for_http())
         .with_state(hub);
 
@@ -33,4 +39,15 @@ async fn main() -> Result<()> {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// POST /revoke — Submit a signed key revocation.
+async fn revoke_handler(
+    State(hub): State<Arc<Hub>>,
+    Json(revocation): Json<KeyRevocation>,
+) -> impl IntoResponse {
+    match hub.revoke(&revocation).await {
+        Ok(()) => (StatusCode::OK, "revoked".to_string()),
+        Err(e) => (StatusCode::BAD_REQUEST, e),
+    }
 }

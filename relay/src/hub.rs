@@ -1,11 +1,11 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::stream::SplitSink;
 use futures_util::SinkExt;
 use mesh_proto::identity::AgentId;
-use mesh_proto::message::MeshEnvelope;
+use mesh_proto::message::{KeyRevocation, MeshEnvelope};
 use tokio::sync::{Mutex, RwLock};
 
 type WsSink = SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message>;
@@ -37,6 +37,8 @@ struct AgentSession {
 pub struct Hub {
     agents: RwLock<HashMap<String, Arc<AgentSession>>>,
     buffers: RwLock<HashMap<String, VecDeque<BufferedMessage>>>,
+    /// Set of revoked agent IDs. Revoked agents cannot authenticate or receive messages.
+    revoked: RwLock<HashSet<String>>,
 }
 
 /// Result of attempting to route a message.
@@ -54,6 +56,7 @@ impl Hub {
         Self {
             agents: RwLock::new(HashMap::new()),
             buffers: RwLock::new(HashMap::new()),
+            revoked: RwLock::new(HashSet::new()),
         }
     }
 
@@ -138,7 +141,19 @@ impl Hub {
 
     /// Route an envelope to the destination agent.
     /// If the target is offline, buffers the message for later delivery.
+    /// Rejects routing if sender or target has been revoked.
     pub async fn route(&self, envelope: &MeshEnvelope) -> Result<RouteResult, String> {
+        // Check revocation for both sender and target.
+        {
+            let revoked = self.revoked.read().await;
+            if revoked.contains(envelope.from.as_str()) {
+                return Err(format!("sender {} is revoked", envelope.from));
+            }
+            if revoked.contains(envelope.to.as_str()) {
+                return Err(format!("target {} is revoked", envelope.to));
+            }
+        }
+
         let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
         let target_key = envelope.to.as_str().to_string();
 
@@ -179,6 +194,50 @@ impl Hub {
         Ok(RouteResult::Buffered)
     }
 
+    /// Check if an agent ID has been revoked.
+    pub async fn is_revoked(&self, agent_id: &AgentId) -> bool {
+        self.revoked.read().await.contains(agent_id.as_str())
+    }
+
+    /// Process a key revocation request.
+    /// Verifies the signature, adds to revoked set, and disconnects the agent if online.
+    pub async fn revoke(&self, revocation: &KeyRevocation) -> Result<(), String> {
+        revocation
+            .verify()
+            .map_err(|e| format!("revocation signature invalid: {e}"))?;
+
+        let id_str = revocation.agent_id.as_str().to_string();
+
+        // Add to revoked set.
+        {
+            let mut revoked = self.revoked.write().await;
+            if !revoked.insert(id_str.clone()) {
+                return Ok(()); // Already revoked.
+            }
+        }
+
+        // Disconnect the agent if currently connected.
+        {
+            let mut agents = self.agents.write().await;
+            if agents.remove(&id_str).is_some() {
+                tracing::info!(agent = id_str.as_str(), "revoked agent disconnected");
+            }
+        }
+
+        // Drop any buffered messages for the revoked agent.
+        {
+            let mut buffers = self.buffers.write().await;
+            buffers.remove(&id_str);
+        }
+
+        tracing::warn!(
+            agent = id_str.as_str(),
+            reason = revocation.reason.as_deref().unwrap_or("none"),
+            "agent key revoked"
+        );
+        Ok(())
+    }
+
     /// Number of connected agents.
     #[allow(dead_code)]
     pub async fn connected_count(&self) -> usize {
@@ -189,6 +248,12 @@ impl Hub {
     #[allow(dead_code)]
     pub async fn buffered_agent_count(&self) -> usize {
         self.buffers.read().await.len()
+    }
+
+    /// Number of revoked agents.
+    #[allow(dead_code)]
+    pub async fn revoked_count(&self) -> usize {
+        self.revoked.read().await.len()
     }
 
     /// Background reaper: sends Ping to idle agents, removes dead ones.
@@ -232,7 +297,10 @@ impl Hub {
             let mut agents = self.agents.write().await;
             for id in &to_remove {
                 if agents.remove(id.as_str()).is_some() {
-                    tracing::warn!(agent = id.as_str(), "dead agent removed (heartbeat timeout)");
+                    tracing::warn!(
+                        agent = id.as_str(),
+                        "dead agent removed (heartbeat timeout)"
+                    );
                 }
             }
         }

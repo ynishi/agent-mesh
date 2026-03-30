@@ -134,6 +134,32 @@ pub async fn request(
     Ok(())
 }
 
+pub async fn revoke(relay_url: &str, reason: Option<&str>, secret_key: Option<&str>) -> Result<()> {
+    let kp = resolve_secret_key(secret_key)?;
+    let agent_id = kp.agent_id();
+
+    let revocation = mesh_proto::message::KeyRevocation::new(&kp, reason.map(|s| s.to_string()));
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{relay_url}/revoke"))
+        .json(&revocation)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body = resp.text().await?;
+    if status.is_success() {
+        println!("Agent {agent_id} revoked successfully.");
+        if let Some(r) = reason {
+            println!("Reason: {r}");
+        }
+    } else {
+        anyhow::bail!("Revocation failed ({}): {}", status, body);
+    }
+    Ok(())
+}
+
 pub fn acl(source_id: &str, target_id: &str, allow_csv: &str) -> Result<()> {
     let rule = AclRule {
         source: AgentId::from_raw(source_id.to_string()),

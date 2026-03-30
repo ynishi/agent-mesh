@@ -66,6 +66,18 @@ enum Commands {
         #[arg(long, default_value = "30")]
         timeout: u64,
     },
+    /// Revoke an agent's key. The agent will be disconnected and blocked.
+    Revoke {
+        /// Relay server HTTP URL.
+        #[arg(long, default_value = "http://localhost:9800")]
+        relay: String,
+        /// Reason for revocation.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Secret key hex (or reads from MESH_SECRET_KEY env).
+        #[arg(long)]
+        secret_key: Option<String>,
+    },
     /// Add an ACL rule (outputs JSON to stdout for inclusion in meshd config).
     Acl {
         /// Source agent ID.
@@ -128,6 +140,11 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Commands::Revoke {
+            relay,
+            reason,
+            secret_key,
+        } => commands::revoke(&relay, reason.as_deref(), secret_key.as_deref()).await,
         Commands::Acl {
             source,
             target,
