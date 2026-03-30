@@ -3,9 +3,10 @@ use std::sync::Arc;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
-use futures_util::stream::StreamExt;
+use futures_util::stream::{SplitSink, SplitStream, StreamExt};
+use futures_util::SinkExt;
 use mesh_proto::identity::AgentId;
-use mesh_proto::message::{AuthHandshake, MeshEnvelope};
+use mesh_proto::message::{AuthChallenge, AuthHello, AuthResponse, AuthResult, MeshEnvelope};
 
 use crate::hub::Hub;
 
@@ -14,13 +15,13 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(hub): State<Arc<Hub>>) -> im
 }
 
 async fn handle_connection(socket: WebSocket, hub: Arc<Hub>) {
-    let (sink, mut stream) = socket.split();
+    let (mut sink, mut stream) = socket.split();
 
-    // Step 1: Wait for auth handshake.
-    let agent_id = match wait_for_auth(&mut stream).await {
+    // Challenge-Response auth.
+    let agent_id = match challenge_response_auth(&mut sink, &mut stream).await {
         Some(id) => id,
         None => {
-            tracing::warn!("connection closed before auth");
+            tracing::warn!("connection closed during auth");
             return;
         }
     };
@@ -28,7 +29,7 @@ async fn handle_connection(socket: WebSocket, hub: Arc<Hub>) {
     // Register with hub.
     hub.register(&agent_id, sink).await;
 
-    // Step 2: Process messages.
+    // Process messages.
     while let Some(msg) = stream.next().await {
         match msg {
             Ok(Message::Text(text)) => {
@@ -48,34 +49,144 @@ async fn handle_connection(socket: WebSocket, hub: Arc<Hub>) {
     hub.unregister(&agent_id).await;
 }
 
-async fn wait_for_auth(
-    stream: &mut futures_util::stream::SplitStream<WebSocket>,
+/// 4-step challenge-response authentication.
+async fn challenge_response_auth(
+    sink: &mut SplitSink<WebSocket, Message>,
+    stream: &mut SplitStream<WebSocket>,
 ) -> Option<AgentId> {
-    while let Some(msg) = stream.next().await {
-        match msg {
-            Ok(Message::Text(text)) => {
-                match serde_json::from_str::<AuthHandshake>(&text) {
-                    Ok(handshake) => {
-                        // v0.1: Accept the agent_id without challenge verification.
-                        // Full challenge-response auth is v0.2.
-                        tracing::info!(
-                            agent = handshake.agent_id.as_str(),
-                            "auth accepted (v0.1 trust-on-first-use)"
-                        );
-                        return Some(handshake.agent_id);
-                    }
-                    Err(e) => {
-                        tracing::warn!("invalid auth handshake: {e}");
-                        return None;
-                    }
-                }
-            }
-            Ok(Message::Close(_)) => return None,
-            Err(_) => return None,
-            _ => {}
+    // Step 1: Receive AuthHello from agent.
+    let hello: AuthHello = match receive_json(stream).await {
+        Some(h) => h,
+        None => {
+            tracing::warn!("auth: failed to receive AuthHello");
+            return None;
+        }
+    };
+    let agent_id = hello.agent_id;
+    tracing::debug!(agent = agent_id.as_str(), "auth: received hello");
+
+    // Step 2: Generate nonce and send AuthChallenge.
+    let nonce = generate_nonce();
+    let challenge = AuthChallenge {
+        nonce: nonce.clone(),
+    };
+    if send_json(sink, &challenge).await.is_err() {
+        tracing::warn!(agent = agent_id.as_str(), "auth: failed to send challenge");
+        return None;
+    }
+    tracing::debug!(agent = agent_id.as_str(), "auth: sent challenge");
+
+    // Step 3: Receive AuthResponse with signed nonce.
+    let response: AuthResponse = match receive_json(stream).await {
+        Some(r) => r,
+        None => {
+            tracing::warn!(
+                agent = agent_id.as_str(),
+                "auth: failed to receive response"
+            );
+            let _ = send_json(
+                sink,
+                &AuthResult {
+                    success: false,
+                    error: Some("no response".into()),
+                },
+            )
+            .await;
+            return None;
+        }
+    };
+
+    // Verify the agent_id matches.
+    if response.agent_id != agent_id {
+        tracing::warn!("auth: agent_id mismatch in response");
+        let _ = send_json(
+            sink,
+            &AuthResult {
+                success: false,
+                error: Some("agent_id mismatch".into()),
+            },
+        )
+        .await;
+        return None;
+    }
+
+    // Verify the signature over the nonce.
+    match verify_nonce_signature(&agent_id, &nonce, &response.signature) {
+        Ok(()) => {
+            let _ = send_json(
+                sink,
+                &AuthResult {
+                    success: true,
+                    error: None,
+                },
+            )
+            .await;
+            tracing::info!(
+                agent = agent_id.as_str(),
+                "auth: challenge-response verified"
+            );
+            Some(agent_id)
+        }
+        Err(e) => {
+            tracing::warn!(agent = agent_id.as_str(), error = %e, "auth: signature verification failed");
+            let _ = send_json(
+                sink,
+                &AuthResult {
+                    success: false,
+                    error: Some(e),
+                },
+            )
+            .await;
+            None
         }
     }
-    None
+}
+
+fn generate_nonce() -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    let mut bytes = [0u8; 32];
+    use rand::RngCore;
+    rand::thread_rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn verify_nonce_signature(agent_id: &AgentId, nonce: &str, sig_b64: &str) -> Result<(), String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use ed25519_dalek::Signature;
+
+    let vk = agent_id
+        .to_verifying_key()
+        .map_err(|e| format!("bad agent_id: {e}"))?;
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(sig_b64)
+        .map_err(|e| format!("bad sig base64: {e}"))?;
+    let sig_arr: [u8; 64] = sig_bytes
+        .try_into()
+        .map_err(|_| "signature must be 64 bytes".to_string())?;
+    let signature = Signature::from_bytes(&sig_arr);
+
+    use ed25519_dalek::Verifier;
+    vk.verify(nonce.as_bytes(), &signature)
+        .map_err(|e| format!("nonce signature invalid: {e}"))
+}
+
+async fn receive_json<T: serde::de::DeserializeOwned>(
+    stream: &mut SplitStream<WebSocket>,
+) -> Option<T> {
+    match stream.next().await {
+        Some(Ok(Message::Text(text))) => serde_json::from_str(&text).ok(),
+        _ => None,
+    }
+}
+
+async fn send_json<T: serde::Serialize>(
+    sink: &mut SplitSink<WebSocket, Message>,
+    value: &T,
+) -> Result<(), ()> {
+    let json = serde_json::to_string(value).map_err(|_| ())?;
+    sink.send(Message::text(json)).await.map_err(|_| ())
 }
 
 async fn handle_text_message(hub: &Hub, sender: &AgentId, text: &str) -> Result<(), String> {

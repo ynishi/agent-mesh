@@ -14,9 +14,17 @@ pub struct MeshEnvelope {
     pub to: AgentId,
     /// Message type tag.
     pub msg_type: MessageType,
+    /// For Response/Error: the original request's envelope ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<Uuid>,
     /// The payload (opaque JSON).
+    /// When `encrypted` is true, this contains a JSON string with
+    /// base64url-encoded Noise ciphertext.
     pub payload: serde_json::Value,
-    /// Ed25519 signature over the canonical form of (id, from, to, msg_type, payload).
+    /// Whether the payload is Noise-encrypted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub encrypted: bool,
+    /// Ed25519 signature over the canonical form.
     /// Base64url-encoded.
     pub signature: String,
     /// Timestamp (Unix millis).
@@ -34,6 +42,8 @@ pub enum MessageType {
     Error,
     /// Relay control messages (auth handshake, ping, etc.).
     Control,
+    /// Noise Protocol handshake message (E2E encryption setup).
+    Handshake,
 }
 
 /// The part of the envelope that gets signed.
@@ -43,17 +53,52 @@ struct SignedPortion<'a> {
     from: &'a AgentId,
     to: &'a AgentId,
     msg_type: &'a MessageType,
+    in_reply_to: &'a Option<Uuid>,
     payload: &'a serde_json::Value,
+    encrypted: bool,
     timestamp: i64,
 }
 
 impl MeshEnvelope {
-    /// Create and sign an envelope.
+    /// Create and sign an envelope (plaintext).
     pub fn new_signed(
         from_keypair: &crate::identity::AgentKeypair,
         to: AgentId,
         msg_type: MessageType,
         payload: serde_json::Value,
+    ) -> Result<Self, crate::error::ProtoError> {
+        Self::build(from_keypair, to, msg_type, None, payload, false)
+    }
+
+    /// Create and sign a reply envelope (with in_reply_to, plaintext).
+    pub fn new_signed_reply(
+        from_keypair: &crate::identity::AgentKeypair,
+        to: AgentId,
+        msg_type: MessageType,
+        in_reply_to: Option<Uuid>,
+        payload: serde_json::Value,
+    ) -> Result<Self, crate::error::ProtoError> {
+        Self::build(from_keypair, to, msg_type, in_reply_to, payload, false)
+    }
+
+    /// Create and sign an encrypted envelope.
+    pub fn new_encrypted(
+        from_keypair: &crate::identity::AgentKeypair,
+        to: AgentId,
+        msg_type: MessageType,
+        in_reply_to: Option<Uuid>,
+        payload: serde_json::Value,
+    ) -> Result<Self, crate::error::ProtoError> {
+        Self::build(from_keypair, to, msg_type, in_reply_to, payload, true)
+    }
+
+    fn build(
+        from_keypair: &crate::identity::AgentKeypair,
+        to: AgentId,
+        msg_type: MessageType,
+        in_reply_to: Option<Uuid>,
+        payload: serde_json::Value,
+        encrypted: bool,
     ) -> Result<Self, crate::error::ProtoError> {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine;
@@ -67,7 +112,9 @@ impl MeshEnvelope {
             from: &from,
             to: &to,
             msg_type: &msg_type,
+            in_reply_to: &in_reply_to,
             payload: &payload,
+            encrypted,
             timestamp,
         };
         let canonical = serde_json::to_vec(&signed)?;
@@ -79,7 +126,9 @@ impl MeshEnvelope {
             from,
             to,
             msg_type,
+            in_reply_to,
             payload,
+            encrypted,
             signature,
             timestamp,
         })
@@ -96,7 +145,9 @@ impl MeshEnvelope {
             from: &self.from,
             to: &self.to,
             msg_type: &self.msg_type,
+            in_reply_to: &self.in_reply_to,
             payload: &self.payload,
+            encrypted: self.encrypted,
             timestamp: self.timestamp,
         };
         let canonical = serde_json::to_vec(&signed)?;
@@ -113,22 +164,42 @@ impl MeshEnvelope {
     }
 }
 
-/// Auth handshake: first message a node sends to the relay.
+/// Step 1: Agent → Relay. Declares identity, requests a challenge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthHandshake {
+pub struct AuthHello {
     pub agent_id: AgentId,
-    /// Signature over the challenge nonce.
-    pub signature: String,
-    /// The challenge nonce (provided by relay or self-generated for initial connect).
+}
+
+/// Step 2: Relay → Agent. Sends a random nonce to be signed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthChallenge {
     pub nonce: String,
 }
 
-/// Relay → node: auth result.
+/// Step 3: Agent → Relay. Returns the signed nonce.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthResponse {
+    pub agent_id: AgentId,
+    /// Ed25519 signature over the nonce bytes, base64url-encoded.
+    pub signature: String,
+}
+
+/// Step 4: Relay → Agent. Auth outcome.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthResult {
     pub success: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+// --- Backward compat alias (will be removed in v0.3) ---
+
+/// Legacy handshake type. Deprecated: use AuthHello + AuthResponse.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthHandshake {
+    pub agent_id: AgentId,
+    pub signature: String,
+    pub nonce: String,
 }
 
 #[cfg(test)]

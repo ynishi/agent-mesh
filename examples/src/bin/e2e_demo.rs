@@ -1,10 +1,11 @@
 //! Agent Mesh E2E Demo
 //!
 //! Starts all components (relay, registry, mock agent, meshd) in-process,
-//! then exercises the full Alice → Relay → Bob flow.
+//! then exercises the full Alice → Relay → Bob flow with E2E encryption.
 //!
 //! Usage: cargo run -p examples --bin e2e-demo
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -13,6 +14,7 @@ use mesh_proto::acl::{AclPolicy, AclRule};
 use mesh_proto::agent_card::{AgentCardRegistration, Capability};
 use mesh_proto::identity::AgentKeypair;
 use mesh_proto::message::{MeshEnvelope, MessageType};
+use mesh_proto::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
@@ -118,8 +120,8 @@ async fn main() -> Result<()> {
     assert_eq!(count, 1, "expected 1 agent, got {count}");
     println!("[PASS] Found {count} agent(s)\n");
 
-    // --- Test 3: Alice → Bob (scheduling) via Relay ---
-    println!("--- Test 3: Alice → Relay → Bob (scheduling) ---");
+    // --- Test 3: Alice → Bob (encrypted scheduling request) ---
+    println!("--- Test 3: Alice → Relay → Bob (E2E encrypted) ---");
     let mesh_client = mesh_sdk::MeshClient::connect(alice_kp, &relay_ws_url)
         .await
         .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
@@ -142,13 +144,29 @@ async fn main() -> Result<()> {
         Some("scheduling")
     );
     println!(
-        "[PASS] Response: {}",
+        "[PASS] Encrypted response: {}",
         serde_json::to_string_pretty(&result)?
     );
     println!();
 
-    // --- Test 4: ACL Denial (admin capability) ---
-    println!("--- Test 4: ACL Denial (admin capability) ---");
+    // --- Test 4: Second request reuses Noise session (no new handshake) ---
+    println!("--- Test 4: Second request reuses Noise session ---");
+    let result2 = mesh_client
+        .request(
+            &bob_id,
+            serde_json::json!({"capability": "availability", "action": "check"}),
+            Duration::from_secs(5),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("request2: {e}"))?;
+    assert_eq!(
+        result2.get("agent").and_then(|v| v.as_str()),
+        Some("bob")
+    );
+    println!("[PASS] Session reuse works\n");
+
+    // --- Test 5: ACL Denial (admin capability, encrypted channel) ---
+    println!("--- Test 5: ACL Denial (admin capability) ---");
     let acl_result = mesh_client
         .request(
             &bob_id,
@@ -162,15 +180,14 @@ async fn main() -> Result<()> {
                 msg.contains("acl_denied"),
                 "expected acl_denied, got: {msg}"
             );
-            println!("[PASS] ACL denied: {msg}\n");
+            println!("[PASS] ACL denied (encrypted): {msg}\n");
         }
         Ok(v) => panic!("[FAIL] Expected ACL denial, got success: {v}"),
         Err(e) => panic!("[FAIL] Expected Remote error, got: {e}"),
     }
 
-    // --- Test 5: Signature Verification (tampered message) ---
-    println!("--- Test 5: Relay rejects tampered envelope ---");
-    // Create a valid envelope, then tamper the payload.
+    // --- Test 6: Signature Verification (tampered message) ---
+    println!("--- Test 6: Relay rejects tampered envelope ---");
     let tamper_kp = AgentKeypair::generate();
     let mut envelope = MeshEnvelope::new_signed(
         &tamper_kp,
@@ -179,7 +196,6 @@ async fn main() -> Result<()> {
         serde_json::json!({"capability": "scheduling"}),
     )?;
     envelope.payload = serde_json::json!({"capability": "admin", "tampered": true});
-    // Verification should fail.
     assert!(envelope.verify().is_err());
     println!("[PASS] Tampered envelope detected\n");
 
@@ -190,15 +206,9 @@ async fn main() -> Result<()> {
 // --- Component starters ---
 
 async fn start_relay() -> Result<SocketAddr> {
-    use axum::{
-        extract::WebSocketUpgrade,
-        routing::get,
-        Router,
-    };
+    use axum::{extract::WebSocketUpgrade, routing::get, Router};
     use std::sync::Arc;
 
-    // Reuse relay's hub/ws logic by spawning the relay binary.
-    // But for in-process testing, we inline a minimal relay.
     let hub = Arc::new(InProcessHub::new());
     let hub2 = Arc::clone(&hub);
 
@@ -227,7 +237,6 @@ async fn start_registry() -> Result<SocketAddr> {
     };
     use std::sync::Arc;
 
-    // Minimal in-process registry backed by a Vec.
     let store = Arc::new(tokio::sync::Mutex::new(Vec::<
         mesh_proto::agent_card::AgentCard,
     >::new()));
@@ -314,6 +323,7 @@ async fn start_mock_agent() -> Result<SocketAddr> {
     Ok(addr)
 }
 
+/// Inline meshd with Noise E2E encryption support.
 async fn run_meshd(
     secret: &[u8; 32],
     relay_url: &str,
@@ -322,10 +332,11 @@ async fn run_meshd(
     bob_id: &mesh_proto::identity::AgentId,
 ) -> Result<()> {
     use futures_util::{SinkExt, StreamExt};
-    use mesh_proto::message::AuthHandshake;
+    use mesh_proto::message::{AuthChallenge, AuthHello, AuthResponse, AuthResult};
     use tokio_tungstenite::tungstenite::Message;
 
     let keypair = AgentKeypair::from_bytes(secret);
+    let noise_keypair = NoiseKeypair::generate().map_err(|e| anyhow::anyhow!("noise: {e}"))?;
     let agent_id = keypair.agent_id();
 
     let mut acl = AclPolicy::new();
@@ -338,14 +349,47 @@ async fn run_meshd(
     let (ws_stream, _) = tokio_tungstenite::connect_async(relay_url).await?;
     let (mut sink, mut stream) = ws_stream.split();
 
-    // Auth handshake.
-    let handshake = AuthHandshake {
+    // Challenge-Response auth.
+    let hello = AuthHello {
         agent_id: agent_id.clone(),
-        signature: String::new(),
-        nonce: String::new(),
     };
-    sink.send(Message::text(serde_json::to_string(&handshake)?))
+    sink.send(Message::text(serde_json::to_string(&hello)?))
         .await?;
+
+    let challenge_text = match stream.next().await {
+        Some(Ok(Message::Text(t))) => t,
+        _ => return Err(anyhow::anyhow!("no challenge")),
+    };
+    let challenge: AuthChallenge = serde_json::from_str(&challenge_text)?;
+
+    let sig = keypair.sign(challenge.nonce.as_bytes());
+    let sig_b64 = {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        URL_SAFE_NO_PAD.encode(sig.to_bytes())
+    };
+    let auth_resp = AuthResponse {
+        agent_id: agent_id.clone(),
+        signature: sig_b64,
+    };
+    sink.send(Message::text(serde_json::to_string(&auth_resp)?))
+        .await?;
+
+    let result_text = match stream.next().await {
+        Some(Ok(Message::Text(t))) => t,
+        _ => return Err(anyhow::anyhow!("no auth result")),
+    };
+    let result: AuthResult = serde_json::from_str(&result_text)?;
+    if !result.success {
+        return Err(anyhow::anyhow!("auth failed: {:?}", result.error));
+    }
+
+    // Per-peer Noise sessions.
+    enum PeerNoise {
+        Handshaking(Box<NoiseHandshake>),
+        Established(NoiseTransport),
+    }
+    let mut sessions: HashMap<String, PeerNoise> = HashMap::new();
 
     // Process messages.
     while let Some(msg) = stream.next().await {
@@ -361,48 +405,188 @@ async fn run_meshd(
                     continue;
                 }
 
-                let capability = envelope
-                    .payload
+                let peer_key = envelope.from.as_str().to_string();
+
+                // Handle Noise handshake.
+                if envelope.msg_type == MessageType::Handshake {
+                    let hs_data = match envelope.payload.as_str() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+
+                    match sessions.get_mut(&peer_key) {
+                        Some(PeerNoise::Handshaking(handshake)) => {
+                            // msg3
+                            if handshake.read_message(hs_data).is_err() {
+                                continue;
+                            }
+                            let state = sessions.remove(&peer_key).unwrap();
+                            let hs = match state {
+                                PeerNoise::Handshaking(h) => *h,
+                                _ => unreachable!(),
+                            };
+                            match hs.into_transport() {
+                                Ok(t) => {
+                                    sessions.insert(peer_key.clone(), PeerNoise::Established(t));
+                                    tracing::info!(peer = peer_key, "noise handshake complete");
+                                }
+                                Err(e) => {
+                                    tracing::warn!("noise transport: {e}");
+                                }
+                            }
+                        }
+                        _ => {
+                            // msg1 - new handshake
+                            let mut hs = match NoiseHandshake::new_responder(&noise_keypair) {
+                                Ok(h) => h,
+                                Err(e) => {
+                                    tracing::warn!("noise responder: {e}");
+                                    continue;
+                                }
+                            };
+                            if hs.read_message(hs_data).is_err() {
+                                continue;
+                            }
+                            let hs_reply = match hs.write_message() {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    tracing::warn!("noise write: {e}");
+                                    continue;
+                                }
+                            };
+                            let reply = MeshEnvelope::new_signed_reply(
+                                &keypair,
+                                envelope.from.clone(),
+                                MessageType::Handshake,
+                                Some(envelope.id),
+                                serde_json::Value::String(hs_reply),
+                            );
+                            if let Ok(reply) = reply {
+                                let json = serde_json::to_string(&reply).unwrap();
+                                let _ = sink.send(Message::text(json)).await;
+                            }
+                            sessions.insert(peer_key, PeerNoise::Handshaking(Box::new(hs)));
+                        }
+                    }
+                    continue;
+                }
+
+                // Decrypt payload if encrypted.
+                let payload = if envelope.encrypted {
+                    let transport = match sessions.get_mut(&peer_key) {
+                        Some(PeerNoise::Established(t)) => t,
+                        _ => {
+                            tracing::warn!("encrypted msg but no session");
+                            continue;
+                        }
+                    };
+                    let ct = match envelope.payload.as_str() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    match transport.decrypt(ct) {
+                        Ok(pt) => match serde_json::from_slice(&pt) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        },
+                        Err(e) => {
+                            tracing::warn!("decrypt: {e}");
+                            continue;
+                        }
+                    }
+                } else {
+                    envelope.payload.clone()
+                };
+
+                let capability = payload
                     .get("capability")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
 
                 if !acl.is_allowed(&envelope.from, &agent_id, capability) {
-                    let err = MeshEnvelope::new_signed(
-                        &keypair,
-                        envelope.from.clone(),
-                        MessageType::Error,
-                        serde_json::json!({
-                            "error": "acl_denied",
-                            "capability": capability,
-                            "request_id": envelope.id.to_string(),
-                        }),
-                    )?;
-                    sink.send(Message::text(serde_json::to_string(&err)?))
-                        .await?;
+                    let err_payload = serde_json::json!({
+                        "error": "acl_denied",
+                        "capability": capability,
+                    });
+                    let err = if envelope.encrypted {
+                        if let Some(PeerNoise::Established(t)) = sessions.get_mut(&peer_key) {
+                            let pt = serde_json::to_vec(&err_payload).unwrap();
+                            match t.encrypt(&pt) {
+                                Ok(ct) => MeshEnvelope::new_encrypted(
+                                    &keypair,
+                                    envelope.from.clone(),
+                                    MessageType::Error,
+                                    Some(envelope.id),
+                                    serde_json::Value::String(ct),
+                                ),
+                                Err(_) => continue,
+                            }
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        MeshEnvelope::new_signed_reply(
+                            &keypair,
+                            envelope.from.clone(),
+                            MessageType::Error,
+                            Some(envelope.id),
+                            err_payload,
+                        )
+                    };
+                    if let Ok(err) = err {
+                        let _ = sink
+                            .send(Message::text(serde_json::to_string(&err).unwrap()))
+                            .await;
+                    }
                     continue;
                 }
 
                 // Forward to local agent.
-                let client = reqwest::Client::new();
-                let resp = client
+                let http_client = reqwest::Client::new();
+                let resp = http_client
                     .post(local_url)
-                    .json(&envelope.payload)
+                    .json(&payload)
                     .timeout(Duration::from_secs(10))
                     .send()
-                    .await?;
-                let mut body: serde_json::Value = resp.json().await?;
-                if let Some(obj) = body.as_object_mut() {
-                    obj.insert(
-                        "request_id".into(),
-                        serde_json::json!(envelope.id.to_string()),
-                    );
-                }
+                    .await;
+                let body: serde_json::Value = match resp {
+                    Ok(r) => match r.json().await {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    },
+                    Err(_) => continue,
+                };
 
-                let response =
-                    MeshEnvelope::new_signed(&keypair, envelope.from, MessageType::Response, body)?;
-                sink.send(Message::text(serde_json::to_string(&response)?))
-                    .await?;
+                let response = if envelope.encrypted {
+                    if let Some(PeerNoise::Established(t)) = sessions.get_mut(&peer_key) {
+                        let pt = serde_json::to_vec(&body).unwrap();
+                        match t.encrypt(&pt) {
+                            Ok(ct) => MeshEnvelope::new_encrypted(
+                                &keypair,
+                                envelope.from,
+                                MessageType::Response,
+                                Some(envelope.id),
+                                serde_json::Value::String(ct),
+                            ),
+                            Err(_) => continue,
+                        }
+                    } else {
+                        continue;
+                    }
+                } else {
+                    MeshEnvelope::new_signed_reply(
+                        &keypair,
+                        envelope.from,
+                        MessageType::Response,
+                        Some(envelope.id),
+                        body,
+                    )
+                };
+                if let Ok(response) = response {
+                    let _ = sink
+                        .send(Message::text(serde_json::to_string(&response).unwrap()))
+                        .await;
+                }
             }
             Ok(Message::Close(_)) => break,
             Err(e) => {
@@ -420,7 +604,6 @@ async fn run_meshd(
 use axum::extract::ws::{Message as AxumMsg, WebSocket};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -460,19 +643,81 @@ impl InProcessHub {
 }
 
 async fn in_process_relay_handle(socket: WebSocket, hub: Arc<InProcessHub>) {
-    let (sink, mut stream) = socket.split();
-    use mesh_proto::message::AuthHandshake;
+    let (mut sink, mut stream) = socket.split();
+    use mesh_proto::message::{AuthChallenge, AuthHello, AuthResponse, AuthResult};
 
-    // Wait for auth (first text message must be a valid handshake).
-    let agent_id = match stream.next().await {
-        Some(Ok(AxumMsg::Text(text))) => {
-            match serde_json::from_str::<AuthHandshake>(&text) {
-                Ok(h) => h.agent_id,
-                Err(_) => return,
-            }
-        }
-        _ => return,
+    // Step 1: Receive AuthHello.
+    let hello: AuthHello = match receive_axum_json(&mut stream).await {
+        Some(h) => h,
+        None => return,
     };
+    let agent_id = hello.agent_id;
+
+    // Step 2: Send AuthChallenge with random nonce.
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let challenge = AuthChallenge {
+        nonce: nonce.clone(),
+    };
+    if send_axum_json(&mut sink, &challenge).await.is_err() {
+        return;
+    }
+
+    // Step 3: Receive AuthResponse and verify.
+    let response: AuthResponse = match receive_axum_json(&mut stream).await {
+        Some(r) => r,
+        None => return,
+    };
+    if response.agent_id != agent_id {
+        let _ = send_axum_json(
+            &mut sink,
+            &AuthResult {
+                success: false,
+                error: Some("id mismatch".into()),
+            },
+        )
+        .await;
+        return;
+    }
+
+    // Verify nonce signature.
+    let verified = (|| -> Result<(), String> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let vk = agent_id.to_verifying_key().map_err(|e| e.to_string())?;
+        let sig_bytes = URL_SAFE_NO_PAD
+            .decode(&response.signature)
+            .map_err(|e| e.to_string())?;
+        let sig_arr: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| "bad sig len".to_string())?;
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        use ed25519_dalek::Verifier;
+        vk.verify(nonce.as_bytes(), &sig).map_err(|e| e.to_string())
+    })();
+
+    match verified {
+        Ok(()) => {
+            let _ = send_axum_json(
+                &mut sink,
+                &AuthResult {
+                    success: true,
+                    error: None,
+                },
+            )
+            .await;
+        }
+        Err(e) => {
+            let _ = send_axum_json(
+                &mut sink,
+                &AuthResult {
+                    success: false,
+                    error: Some(e),
+                },
+            )
+            .await;
+            return;
+        }
+    }
 
     let id_str = agent_id.as_str().to_string();
     hub.register(&id_str, sink).await;
@@ -497,4 +742,21 @@ async fn in_process_relay_handle(socket: WebSocket, hub: Arc<InProcessHub>) {
     }
 
     hub.unregister(&id_str).await;
+}
+
+async fn receive_axum_json<T: serde::de::DeserializeOwned>(
+    stream: &mut futures_util::stream::SplitStream<WebSocket>,
+) -> Option<T> {
+    match stream.next().await {
+        Some(Ok(AxumMsg::Text(text))) => serde_json::from_str(&text).ok(),
+        _ => None,
+    }
+}
+
+async fn send_axum_json<T: serde::Serialize>(
+    sink: &mut SplitSink<WebSocket, AxumMsg>,
+    value: &T,
+) -> Result<(), ()> {
+    let json = serde_json::to_string(value).map_err(|_| ())?;
+    sink.send(AxumMsg::text(json)).await.map_err(|_| ())
 }

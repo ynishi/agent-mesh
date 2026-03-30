@@ -19,6 +19,9 @@ pub enum ProtoError {
 
     #[error("serialization error: {0}")]
     Serialization(String),
+
+    #[error("noise protocol error: {0}")]
+    Noise(String),
 }
 
 impl From<serde_json::Error> for ProtoError {
