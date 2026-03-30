@@ -1,0 +1,25 @@
+[package]
+name = "meshctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "meshctl"
+path = "src/main.rs"
+
+[dependencies]
+mesh-proto = { workspace = true }
+mesh-sdk = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+hex = "0.4"
