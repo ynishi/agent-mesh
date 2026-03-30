@@ -12,18 +12,31 @@ pub struct NodeConfig {
     pub relay_url: String,
     /// Local agent HTTP endpoint to proxy requests to.
     pub local_agent_url: String,
-    /// ACL policy.
+    /// ACL policy (inline).
     #[serde(default)]
     pub acl: AclPolicy,
+    /// Path to the config file (set internally for hot reload).
+    #[serde(skip)]
+    pub config_path: Option<String>,
 }
 
 impl NodeConfig {
     pub fn load(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config: {path}"))?;
-        let config: Self =
+        let mut config: Self =
             serde_json::from_str(&content).with_context(|| "failed to parse config")?;
+        config.config_path = Some(path.to_string());
         Ok(config)
+    }
+
+    /// Reload ACL policy from the config file.
+    pub fn reload_acl(path: &str) -> Result<AclPolicy> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read config for reload: {path}"))?;
+        let config: Self =
+            serde_json::from_str(&content).with_context(|| "failed to parse config for reload")?;
+        Ok(config.acl)
     }
 
     pub fn keypair(&self) -> Result<AgentKeypair> {

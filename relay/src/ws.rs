@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -19,8 +20,12 @@ async fn handle_connection(socket: WebSocket, hub: Arc<Hub>) {
 
     // Challenge-Response auth.
     let agent_id = match challenge_response_auth(&mut sink, &mut stream).await {
-        Some(id) => id,
+        Some(id) => {
+            hub.auth_successes.fetch_add(1, Ordering::Relaxed);
+            id
+        }
         None => {
+            hub.auth_failures.fetch_add(1, Ordering::Relaxed);
             tracing::warn!("connection closed during auth");
             return;
         }

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,12 @@ pub struct Hub {
     buffers: RwLock<HashMap<String, VecDeque<BufferedMessage>>>,
     /// Set of revoked agent IDs. Revoked agents cannot authenticate or receive messages.
     revoked: RwLock<HashSet<String>>,
+    /// Counters for metrics.
+    pub messages_routed: AtomicU64,
+    pub messages_buffered: AtomicU64,
+    pub messages_dropped: AtomicU64,
+    pub auth_successes: AtomicU64,
+    pub auth_failures: AtomicU64,
 }
 
 /// Result of attempting to route a message.
@@ -57,6 +64,11 @@ impl Hub {
             agents: RwLock::new(HashMap::new()),
             buffers: RwLock::new(HashMap::new()),
             revoked: RwLock::new(HashSet::new()),
+            messages_routed: AtomicU64::new(0),
+            messages_buffered: AtomicU64::new(0),
+            messages_dropped: AtomicU64::new(0),
+            auth_successes: AtomicU64::new(0),
+            auth_failures: AtomicU64::new(0),
         }
     }
 
@@ -165,6 +177,7 @@ impl Hub {
                 sink.send(axum::extract::ws::Message::text(json))
                     .await
                     .map_err(|e| format!("send: {e}"))?;
+                self.messages_routed.fetch_add(1, Ordering::Relaxed);
                 return Ok(RouteResult::Delivered);
             }
         }
@@ -184,6 +197,7 @@ impl Hub {
         }
 
         if queue.len() >= MAX_BUFFERED_PER_AGENT {
+            self.messages_dropped.fetch_add(1, Ordering::Relaxed);
             return Ok(RouteResult::BufferFull);
         }
 
@@ -191,6 +205,7 @@ impl Hub {
             json,
             enqueued_at: now,
         });
+        self.messages_buffered.fetch_add(1, Ordering::Relaxed);
         Ok(RouteResult::Buffered)
     }
 
@@ -239,21 +254,23 @@ impl Hub {
     }
 
     /// Number of connected agents.
-    #[allow(dead_code)]
     pub async fn connected_count(&self) -> usize {
         self.agents.read().await.len()
     }
 
     /// Number of agents with buffered messages.
-    #[allow(dead_code)]
     pub async fn buffered_agent_count(&self) -> usize {
         self.buffers.read().await.len()
     }
 
     /// Number of revoked agents.
-    #[allow(dead_code)]
     pub async fn revoked_count(&self) -> usize {
         self.revoked.read().await.len()
+    }
+
+    /// List connected agent IDs.
+    pub async fn connected_agent_ids(&self) -> Vec<String> {
+        self.agents.read().await.keys().cloned().collect()
     }
 
     /// Background reaper: sends Ping to idle agents, removes dead ones.

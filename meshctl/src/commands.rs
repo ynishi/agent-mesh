@@ -134,6 +134,47 @@ pub async fn request(
     Ok(())
 }
 
+pub async fn status(relay_url: &str) -> Result<()> {
+    let client = reqwest::Client::new();
+    let resp = client.get(format!("{relay_url}/status")).send().await?;
+
+    let status_code = resp.status();
+    if !status_code.is_success() {
+        anyhow::bail!("status request failed: {}", status_code);
+    }
+
+    let body: serde_json::Value = resp.json().await?;
+    let connected = body
+        .get("connected_agents")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let buffered = body
+        .get("buffered_agents")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let revoked = body
+        .get("revoked_agents")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    println!("Relay Status:");
+    println!("  Connected agents: {connected}");
+    println!("  Buffered agents:  {buffered}");
+    println!("  Revoked agents:   {revoked}");
+
+    if let Some(agents) = body.get("agents").and_then(|v| v.as_array()) {
+        if !agents.is_empty() {
+            println!("  Online:");
+            for a in agents {
+                if let Some(id) = a.as_str() {
+                    println!("    - {id}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn revoke(relay_url: &str, reason: Option<&str>, secret_key: Option<&str>) -> Result<()> {
     let kp = resolve_secret_key(secret_key)?;
     let agent_id = kp.agent_id();

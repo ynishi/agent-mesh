@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Result;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
@@ -8,6 +9,7 @@ use mesh_proto::message::{
     AuthChallenge, AuthHello, AuthResponse, AuthResult, MeshEnvelope, MessageType,
 };
 use mesh_proto::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
+use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::NodeConfig;
@@ -29,7 +31,8 @@ pub struct MeshNode {
     noise_keypair: NoiseKeypair,
     relay_url: String,
     local_agent_url: String,
-    acl: mesh_proto::acl::AclPolicy,
+    acl: Arc<RwLock<mesh_proto::acl::AclPolicy>>,
+    config_path: Option<String>,
 }
 
 impl MeshNode {
@@ -37,16 +40,45 @@ impl MeshNode {
         let keypair = config.keypair()?;
         let noise_keypair =
             NoiseKeypair::generate().map_err(|e| anyhow::anyhow!("noise keygen: {e}"))?;
+        let config_path = config.config_path.clone();
         Ok(Self {
             keypair,
             noise_keypair,
             relay_url: config.relay_url,
             local_agent_url: config.local_agent_url,
-            acl: config.acl,
+            acl: Arc::new(RwLock::new(config.acl)),
+            config_path,
         })
     }
 
+    /// Start SIGHUP listener for ACL hot reload.
+    pub fn start_acl_reload_listener(&self) {
+        let Some(path) = self.config_path.clone() else {
+            return;
+        };
+        let acl = Arc::clone(&self.acl);
+        tokio::spawn(async move {
+            let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                .expect("failed to register SIGHUP handler");
+            loop {
+                sighup.recv().await;
+                tracing::info!("SIGHUP received, reloading ACL from {path}");
+                match NodeConfig::reload_acl(&path) {
+                    Ok(new_acl) => {
+                        let rule_count = new_acl.rules.len();
+                        *acl.write().await = new_acl;
+                        tracing::info!(rules = rule_count, "ACL reloaded");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "ACL reload failed, keeping old policy");
+                    }
+                }
+            }
+        });
+    }
+
     pub async fn run(&self) -> Result<()> {
+        self.start_acl_reload_listener();
         loop {
             match self.connect_and_serve().await {
                 Ok(()) => tracing::info!("relay connection closed, reconnecting..."),
@@ -191,7 +223,12 @@ impl MeshNode {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
         let my_id = self.keypair.agent_id();
-        if !self.acl.is_allowed(&envelope.from, &my_id, capability) {
+        if !self
+            .acl
+            .read()
+            .await
+            .is_allowed(&envelope.from, &my_id, capability)
+        {
             tracing::warn!(
                 from = envelope.from.as_str(),
                 capability = capability,

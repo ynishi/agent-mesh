@@ -66,6 +66,12 @@ enum Commands {
         #[arg(long, default_value = "30")]
         timeout: u64,
     },
+    /// Show relay status (connected agents, buffers, revocations).
+    Status {
+        /// Relay server HTTP URL.
+        #[arg(long, default_value = "http://localhost:9800")]
+        relay: String,
+    },
     /// Revoke an agent's key. The agent will be disconnected and blocked.
     Revoke {
         /// Relay server HTTP URL.
@@ -140,6 +146,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Commands::Status { relay } => commands::status(&relay).await,
         Commands::Revoke {
             relay,
             reason,
