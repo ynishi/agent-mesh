@@ -79,6 +79,11 @@ impl AgentKeypair {
     pub fn secret_bytes(&self) -> &[u8; 32] {
         self.signing_key.as_bytes()
     }
+
+    /// Create a copy of this keypair (re-derives from secret bytes).
+    pub fn clone_inner(&self) -> Self {
+        Self::from_bytes(self.signing_key.as_bytes())
+    }
 }
 
 /// Verify a signature against an AgentId.

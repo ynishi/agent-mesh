@@ -62,3 +62,4 @@ chrono = { version = "0.4", features = ["serde"] }
 # Misc
 uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"
+async-trait = "0.1"

@@ -66,6 +66,7 @@ impl Database {
             registered_at: now,
             updated_at: now,
             metadata: reg.metadata.clone(),
+            online: None,
         })
     }
 
@@ -128,6 +129,54 @@ impl Database {
         Ok(cards)
     }
 
+    pub fn update(&self, id: &Uuid, reg: &AgentCardRegistration) -> Result<Option<AgentCard>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        // Verify the card exists and agent_id matches.
+        let existing = {
+            let mut stmt = conn.prepare("SELECT agent_id FROM agent_cards WHERE id = ?1")?;
+            let mut rows = stmt.query(params![id.to_string()])?;
+            match rows.next()? {
+                Some(row) => {
+                    let existing_agent_id: String = row.get(0)?;
+                    existing_agent_id
+                }
+                None => return Ok(None),
+            }
+        };
+
+        if existing != reg.agent_id.as_str() {
+            return Err(anyhow::anyhow!(
+                "agent_id mismatch: card belongs to {}, update from {}",
+                existing,
+                reg.agent_id
+            ));
+        }
+
+        let now = chrono::Utc::now();
+        let caps_json = serde_json::to_string(&reg.capabilities)?;
+        let meta_json = reg
+            .metadata
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+
+        conn.execute(
+            "UPDATE agent_cards SET name = ?1, description = ?2, capabilities = ?3, metadata = ?4, updated_at = ?5
+             WHERE id = ?6",
+            params![
+                reg.name,
+                reg.description,
+                caps_json,
+                meta_json,
+                now.to_rfc3339(),
+                id.to_string(),
+            ],
+        )?;
+
+        self.get_by_id(id)
+    }
+
     pub fn delete(&self, id: &Uuid) -> Result<bool> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let affected = conn.execute(
@@ -157,5 +206,6 @@ fn row_to_card(row: &rusqlite::Row) -> Result<AgentCard> {
         metadata: meta_json.map(|s| serde_json::from_str(&s)).transpose()?,
         registered_at: chrono::DateTime::parse_from_rfc3339(&registered_str)?.to_utc(),
         updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)?.to_utc(),
+        online: None,
     })
 }

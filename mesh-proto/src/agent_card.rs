@@ -42,6 +42,10 @@ pub struct AgentCard {
     /// Optional metadata (rate limits, cost, version, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// Whether the agent is currently connected to the relay.
+    /// Populated at query time; not stored in the database.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online: Option<bool>,
 }
 
 /// Request to register or update an agent card.
