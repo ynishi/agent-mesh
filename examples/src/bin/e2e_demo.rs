@@ -186,8 +186,70 @@ async fn main() -> Result<()> {
         Err(e) => panic!("[FAIL] Expected Remote error, got: {e}"),
     }
 
-    // --- Test 6: Signature Verification (tampered message) ---
-    println!("--- Test 6: Relay rejects tampered envelope ---");
+    // --- Test 6: Message buffering (offline agent) ---
+    println!("--- Test 6: Message buffering for offline agent ---");
+    {
+        let bob2_kp = AgentKeypair::generate();
+        let alice2_kp = AgentKeypair::generate();
+        let bob2_id = bob2_kp.agent_id();
+        let bob2_secret = *bob2_kp.secret_bytes();
+        let nc2_id_for_acl = alice2_kp.agent_id();
+        let ic2_id_for_acl = bob2_id.clone();
+        let ic2_id_for_req = bob2_id.clone();
+        let relay_url2 = relay_ws_url.clone();
+        let relay_url_buf = relay_ws_url.clone();
+        let mock_url2 = format!("http://{mock_addr}");
+
+        // Spawn request to Bob2 (offline). Relay will buffer it.
+        let buffer_task = tokio::spawn(async move {
+            let mc = mesh_sdk::MeshClient::connect(alice2_kp, &relay_url_buf)
+                .await
+                .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            mc.request_plaintext(
+                &ic2_id_for_req,
+                serde_json::json!({"capability": "scheduling", "action": "buffered"}),
+                Duration::from_secs(10),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+        });
+
+        // Wait for message to be buffered.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Now connect Bob2 — buffered message should be flushed.
+        tokio::spawn(async move {
+            run_meshd(
+                &bob2_secret,
+                &relay_url2,
+                &mock_url2,
+                &nc2_id_for_acl,
+                &ic2_id_for_acl,
+            )
+            .await
+        });
+
+        let buffer_result = buffer_task
+            .await
+            .map_err(|e| anyhow::anyhow!("join: {e}"))?
+            .map_err(|e| anyhow::anyhow!("buffered request: {e}"))?;
+        assert_eq!(
+            buffer_result.get("agent").and_then(|v| v.as_str()),
+            Some("bob")
+        );
+        println!(
+            "[PASS] Buffered message delivered after agent connected: {}",
+            buffer_result
+                .get("capability")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+        );
+    }
+    println!();
+
+    // --- Test 7: Signature Verification (tampered message) ---
+    println!("--- Test 7: Relay rejects tampered envelope ---");
     let tamper_kp = AgentKeypair::generate();
     let mut envelope = MeshEnvelope::new_signed(
         &tamper_kp,
@@ -609,22 +671,39 @@ use tokio::sync::{Mutex, RwLock};
 
 type WsSink = SplitSink<WebSocket, AxumMsg>;
 
+use std::collections::VecDeque;
+
 struct InProcessHub {
     agents: RwLock<HashMap<String, Arc<Mutex<WsSink>>>>,
+    buffers: RwLock<HashMap<String, VecDeque<String>>>,
 }
 
 impl InProcessHub {
     fn new() -> Self {
         Self {
             agents: RwLock::new(HashMap::new()),
+            buffers: RwLock::new(HashMap::new()),
         }
     }
 
     async fn register(&self, id: &str, sink: WsSink) {
+        let sink = Arc::new(Mutex::new(sink));
         self.agents
             .write()
             .await
-            .insert(id.to_string(), Arc::new(Mutex::new(sink)));
+            .insert(id.to_string(), Arc::clone(&sink));
+
+        // Flush buffered messages.
+        let pending = {
+            let mut buffers = self.buffers.write().await;
+            buffers.remove(id)
+        };
+        if let Some(messages) = pending {
+            let mut s = sink.lock().await;
+            for msg in messages {
+                let _ = s.send(AxumMsg::text(msg)).await;
+            }
+        }
     }
 
     async fn unregister(&self, id: &str) {
@@ -637,6 +716,13 @@ impl InProcessHub {
             let mut sink = sink.lock().await;
             sink.send(AxumMsg::text(msg.to_string())).await.is_ok()
         } else {
+            drop(agents);
+            // Buffer for offline agent.
+            let mut buffers = self.buffers.write().await;
+            let queue = buffers.entry(to.to_string()).or_default();
+            if queue.len() < 100 {
+                queue.push_back(msg.to_string());
+            }
             false
         }
     }

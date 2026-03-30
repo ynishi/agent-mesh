@@ -206,9 +206,10 @@ async fn handle_text_message(hub: &Hub, sender: &AgentId, text: &str) -> Result<
         .verify()
         .map_err(|e| format!("signature verification failed: {e}"))?;
 
-    // Route to destination.
+    // Route to destination (with offline buffering).
+    use crate::hub::RouteResult;
     match hub.route(&envelope).await {
-        Ok(true) => {
+        Ok(RouteResult::Delivered) => {
             tracing::debug!(
                 from = sender.as_str(),
                 to = envelope.to.as_str(),
@@ -216,13 +217,21 @@ async fn handle_text_message(hub: &Hub, sender: &AgentId, text: &str) -> Result<
             );
             Ok(())
         }
-        Ok(false) => {
+        Ok(RouteResult::Buffered) => {
+            tracing::debug!(
+                from = sender.as_str(),
+                to = envelope.to.as_str(),
+                "target offline, message buffered"
+            );
+            Ok(())
+        }
+        Ok(RouteResult::BufferFull) => {
             tracing::warn!(
                 from = sender.as_str(),
                 to = envelope.to.as_str(),
-                "target not connected"
+                "target offline and buffer full"
             );
-            Err(format!("target {} not connected", envelope.to))
+            Err(format!("target {} offline and buffer full", envelope.to))
         }
         Err(e) => Err(e),
     }
