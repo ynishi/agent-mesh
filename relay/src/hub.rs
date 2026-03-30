@@ -14,6 +14,11 @@ type WsSink = SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message
 const MAX_BUFFERED_PER_AGENT: usize = 100;
 const BUFFER_TTL: Duration = Duration::from_secs(300); // 5 minutes
 
+/// Heartbeat configuration.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+const PING_THRESHOLD: Duration = Duration::from_secs(60);
+const DEAD_THRESHOLD: Duration = Duration::from_secs(90);
+
 /// A buffered message waiting for delivery.
 struct BufferedMessage {
     json: String,
@@ -23,10 +28,12 @@ struct BufferedMessage {
 /// Connected agent session.
 struct AgentSession {
     sink: Mutex<WsSink>,
+    last_activity: Mutex<Instant>,
 }
 
 /// Central hub that routes messages between connected agents.
 /// Buffers messages for offline agents (up to limits).
+/// Runs a background reaper to detect and remove dead agents.
 pub struct Hub {
     agents: RwLock<HashMap<String, Arc<AgentSession>>>,
     buffers: RwLock<HashMap<String, VecDeque<BufferedMessage>>>,
@@ -50,11 +57,24 @@ impl Hub {
         }
     }
 
+    /// Start the background reaper task for dead agent detection.
+    /// Call once after creating the Hub.
+    pub fn start_reaper(self: &Arc<Self>) {
+        let hub = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(PING_INTERVAL).await;
+                hub.reap_dead_agents().await;
+            }
+        });
+    }
+
     /// Register a connected agent's WebSocket sink.
     /// Flushes any buffered messages to the newly connected agent.
     pub async fn register(&self, agent_id: &AgentId, sink: WsSink) {
         let session = Arc::new(AgentSession {
             sink: Mutex::new(sink),
+            last_activity: Mutex::new(Instant::now()),
         });
         let id_str = agent_id.as_str().to_string();
 
@@ -105,6 +125,15 @@ impl Hub {
         let mut agents = self.agents.write().await;
         agents.remove(agent_id.as_str());
         tracing::info!(agent = agent_id.as_str(), "agent unregistered");
+    }
+
+    /// Update last activity timestamp for an agent.
+    /// Called on every received message.
+    pub async fn touch(&self, agent_id: &AgentId) {
+        let agents = self.agents.read().await;
+        if let Some(session) = agents.get(agent_id.as_str()) {
+            *session.last_activity.lock().await = Instant::now();
+        }
     }
 
     /// Route an envelope to the destination agent.
@@ -160,5 +189,52 @@ impl Hub {
     #[allow(dead_code)]
     pub async fn buffered_agent_count(&self) -> usize {
         self.buffers.read().await.len()
+    }
+
+    /// Background reaper: sends Ping to idle agents, removes dead ones.
+    async fn reap_dead_agents(&self) {
+        let now = Instant::now();
+        let mut to_ping = Vec::new();
+        let mut to_remove = Vec::new();
+
+        // Collect agents that need action.
+        {
+            let agents = self.agents.read().await;
+            for (id, session) in agents.iter() {
+                let last = *session.last_activity.lock().await;
+                let idle = now.duration_since(last);
+
+                if idle > DEAD_THRESHOLD {
+                    to_remove.push(id.clone());
+                } else if idle > PING_THRESHOLD {
+                    to_ping.push((id.clone(), Arc::clone(session)));
+                }
+            }
+        }
+
+        // Send Ping to idle agents.
+        for (id, session) in &to_ping {
+            let mut sink = session.sink.lock().await;
+            if sink
+                .send(axum::extract::ws::Message::Ping(Vec::new().into()))
+                .await
+                .is_err()
+            {
+                // Send failed — mark for removal.
+                to_remove.push(id.clone());
+            } else {
+                tracing::debug!(agent = id.as_str(), "sent heartbeat ping");
+            }
+        }
+
+        // Remove dead agents.
+        if !to_remove.is_empty() {
+            let mut agents = self.agents.write().await;
+            for id in &to_remove {
+                if agents.remove(id.as_str()).is_some() {
+                    tracing::warn!(agent = id.as_str(), "dead agent removed (heartbeat timeout)");
+                }
+            }
+        }
     }
 }

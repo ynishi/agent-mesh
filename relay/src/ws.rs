@@ -31,11 +31,17 @@ async fn handle_connection(socket: WebSocket, hub: Arc<Hub>) {
 
     // Process messages.
     while let Some(msg) = stream.next().await {
+        // Any received frame counts as activity (including Pong).
+        hub.touch(&agent_id).await;
+
         match msg {
             Ok(Message::Text(text)) => {
                 if let Err(e) = handle_text_message(&hub, &agent_id, &text).await {
                     tracing::warn!(agent = agent_id.as_str(), error = %e, "message handling error");
                 }
+            }
+            Ok(Message::Pong(_)) => {
+                tracing::debug!(agent = agent_id.as_str(), "pong received");
             }
             Ok(Message::Close(_)) => break,
             Err(e) => {

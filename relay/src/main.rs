@@ -16,6 +16,7 @@ async fn main() -> Result<()> {
         .init();
 
     let hub = Arc::new(Hub::new());
+    hub.start_reaper();
     let addr = std::env::var("RELAY_ADDR").unwrap_or_else(|_| "0.0.0.0:9800".into());
 
     let app = Router::new()
