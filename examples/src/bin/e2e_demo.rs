@@ -775,7 +775,10 @@ async fn main() -> Result<()> {
             successes, rejected, rate_limited, other_errors
         );
         assert!(successes > 0, "at least some requests should succeed");
-        assert!(rejected > 0, "some requests should be rejected by rate limit");
+        assert!(
+            rejected > 0,
+            "some requests should be rejected by rate limit"
+        );
         println!(
             "[PASS] Rate limiting verified: {} succeeded, {} rejected",
             successes, rejected

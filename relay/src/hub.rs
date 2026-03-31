@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,6 +8,7 @@ use futures_util::stream::SplitSink;
 use futures_util::SinkExt;
 use mesh_proto::identity::AgentId;
 use mesh_proto::message::{KeyRevocation, MeshEnvelope};
+use rusqlite::Connection;
 use tokio::sync::{Mutex, RwLock};
 
 type WsSink = SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message>;
@@ -94,6 +96,8 @@ pub struct Hub {
     rate_limiters: Mutex<HashMap<String, TokenBucket>>,
     rate_limit: f64,
     rate_burst: f64,
+    /// SQLite path for persistent state (revocations).
+    db_path: Mutex<Option<PathBuf>>,
     /// Counters for metrics.
     pub messages_routed: AtomicU64,
     pub messages_buffered: AtomicU64,
@@ -116,6 +120,7 @@ pub enum RouteResult {
 }
 
 impl Hub {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::with_rate_limit(DEFAULT_RATE_LIMIT, DEFAULT_RATE_BURST)
     }
@@ -129,6 +134,7 @@ impl Hub {
             rate_limiters: Mutex::new(HashMap::new()),
             rate_limit: rate,
             rate_burst: burst,
+            db_path: Mutex::new(None),
             messages_routed: AtomicU64::new(0),
             messages_buffered: AtomicU64::new(0),
             messages_dropped: AtomicU64::new(0),
@@ -324,6 +330,10 @@ impl Hub {
             buffers.remove(&id_str);
         }
 
+        // Persist to SQLite.
+        self.persist_revocation_async(&id_str, revocation.reason.as_deref())
+            .await;
+
         tracing::warn!(
             agent = id_str.as_str(),
             reason = revocation.reason.as_deref().unwrap_or("none"),
@@ -376,6 +386,94 @@ impl Hub {
             return None;
         }
         Some(session.agent_id.clone())
+    }
+
+    /// Initialize SQLite persistence: create table, load revoked set.
+    pub async fn init_persistence(&self, db_path: &std::path::Path) -> Result<(), String> {
+        let db_path_owned = db_path.to_path_buf();
+        let ids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
+            let conn = Connection::open(&db_path_owned).map_err(|e| format!("open db: {e}"))?;
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS revoked_agents (
+                    agent_id TEXT PRIMARY KEY,
+                    reason TEXT,
+                    revoked_at INTEGER NOT NULL
+                )",
+            )
+            .map_err(|e| format!("create table: {e}"))?;
+
+            let mut stmt = conn
+                .prepare("SELECT agent_id FROM revoked_agents")
+                .map_err(|e| format!("prepare: {e}"))?;
+            let ids: Vec<String> = stmt
+                .query_map([], |row| row.get(0))
+                .map_err(|e| format!("query: {e}"))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(ids)
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking: {e}"))??;
+
+        let count = ids.len();
+        {
+            let mut revoked = self.revoked.write().await;
+            for id in ids {
+                revoked.insert(id);
+            }
+        }
+
+        *self.db_path.lock().await = Some(db_path.to_path_buf());
+
+        if count > 0 {
+            tracing::info!(count, "loaded persisted revocations");
+        }
+        Ok(())
+    }
+
+    /// Persist a revocation to SQLite (async).
+    async fn persist_revocation_async(&self, agent_id: &str, reason: Option<&str>) {
+        let db_path = {
+            let path = self.db_path.lock().await;
+            match path.as_ref() {
+                Some(p) => p.clone(),
+                None => return,
+            }
+        };
+        let agent_id = agent_id.to_string();
+        let reason = reason.map(|s| s.to_string());
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&db_path)?;
+            let now = chrono::Utc::now().timestamp_millis();
+            conn.execute(
+                "INSERT OR IGNORE INTO revoked_agents (agent_id, reason, revoked_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![agent_id, reason, now],
+            )?;
+            Ok::<(), rusqlite::Error>(())
+        })
+        .await
+        {
+            tracing::warn!(error = %e, "failed to persist revocation");
+        }
+    }
+
+    /// Graceful shutdown: send WS Close to all connected agents.
+    pub async fn shutdown(&self) {
+        let agents = self.agents.write().await;
+        let count = agents.len();
+        for (id, session) in agents.iter() {
+            let mut sink = session.sink.lock().await;
+            if sink
+                .send(axum::extract::ws::Message::Close(None))
+                .await
+                .is_err()
+            {
+                tracing::debug!(agent = id.as_str(), "close frame send failed");
+            }
+        }
+        if count > 0 {
+            tracing::info!(count, "sent close frames to all agents");
+        }
     }
 
     /// Background reaper: sends Ping to idle agents, removes dead ones.
