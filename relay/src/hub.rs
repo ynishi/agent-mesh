@@ -25,11 +25,6 @@ const DEAD_THRESHOLD: Duration = Duration::from_secs(90);
 /// Session token TTL for connection resumption.
 const SESSION_TOKEN_TTL: Duration = Duration::from_secs(300); // 5 minutes
 
-/// Default rate limit: messages per second per agent.
-const DEFAULT_RATE_LIMIT: f64 = 50.0;
-/// Token bucket burst size (max tokens that can accumulate).
-const DEFAULT_RATE_BURST: f64 = 100.0;
-
 /// Stored session for connection resumption.
 struct StoredSession {
     agent_id: String,
@@ -120,11 +115,6 @@ pub enum RouteResult {
 }
 
 impl Hub {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self::with_rate_limit(DEFAULT_RATE_LIMIT, DEFAULT_RATE_BURST)
-    }
-
     pub fn with_rate_limit(rate: f64, burst: f64) -> Self {
         Self {
             agents: RwLock::new(HashMap::new()),

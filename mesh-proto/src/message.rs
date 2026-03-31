@@ -276,16 +276,6 @@ impl KeyRevocation {
     }
 }
 
-// --- Backward compat alias (will be removed in v0.3) ---
-
-/// Legacy handshake type. Deprecated: use AuthHello + AuthResponse.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthHandshake {
-    pub agent_id: AgentId,
-    pub signature: String,
-    pub nonce: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

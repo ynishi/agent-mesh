@@ -7,23 +7,17 @@ use futures_util::stream::StreamExt;
 use futures_util::SinkExt;
 use mesh_proto::acl::AclPolicy;
 use mesh_proto::identity::{AgentId, AgentKeypair};
-use mesh_proto::message::{
-    AuthChallenge, AuthHello, AuthResponse, AuthResult, AuthResume, MeshEnvelope, MessageType,
-};
+use mesh_proto::message::{MeshEnvelope, MessageType};
 use mesh_proto::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
+use crate::connection::{
+    attempt_resume, challenge_response_auth, decrypt_envelope_payload, MeshConnection, PendingMap,
+    SessionMap, StreamPendingMap, WsSink, WsStream,
+};
 use crate::error::SdkError;
-
-type PendingMap = Arc<Mutex<HashMap<Uuid, oneshot::Sender<MeshEnvelope>>>>;
-type StreamPendingMap =
-    Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<Result<serde_json::Value, SdkError>>>>>;
-type SessionMap = Arc<Mutex<HashMap<String, NoiseTransport>>>;
-type WsSink = futures_util::stream::SplitSink<WsStream, Message>;
-type WsStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// A stream of JSON values yielded by a streaming handler.
 pub type ValueStream =
@@ -51,11 +45,9 @@ impl CancelToken {
 
     /// Wait until cancelled. Completes immediately if already cancelled.
     pub async fn cancelled(&mut self) {
-        // If already cancelled, return immediately.
         if *self.rx.borrow() {
             return;
         }
-        // Wait for the value to change to true.
         let _ = self.rx.changed().await;
     }
 }
@@ -97,8 +89,6 @@ pub trait RequestHandler: Send + Sync + 'static {
 }
 
 /// Async function handler — convenience wrapper.
-/// The closure signature is `Fn(AgentId, serde_json::Value) -> Future<Output = Value>`.
-/// CancelToken is not passed to keep the simple closure API; use the trait directly for cancellation.
 #[async_trait::async_trait]
 impl<F, Fut> RequestHandler for F
 where
@@ -121,14 +111,8 @@ where
 /// authenticates, and processes incoming messages including Noise handshakes, ACL checks,
 /// and request handling — all within the SDK.
 pub struct MeshAgent {
-    keypair: Arc<AgentKeypair>,
-    noise_keypair: Arc<NoiseKeypair>,
-    pending: PendingMap,
-    stream_pending: StreamPendingMap,
-    sink: Arc<Mutex<WsSink>>,
-    sessions: SessionMap,
+    conn: MeshConnection,
     acl: Arc<RwLock<AclPolicy>>,
-    session_token: Arc<Mutex<Option<String>>>,
 }
 
 impl MeshAgent {
@@ -145,45 +129,8 @@ impl MeshAgent {
 
         let (mut sink, mut stream) = ws_stream.split();
 
-        // Challenge-Response auth.
-        let hello = AuthHello {
-            agent_id: keypair.agent_id(),
-        };
-        let json = serde_json::to_string(&hello).map_err(|e| SdkError::Protocol(e.to_string()))?;
-        sink.send(Message::text(json))
-            .await
-            .map_err(|e| SdkError::Auth(e.to_string()))?;
-
-        let challenge: AuthChallenge = receive_ws_json(&mut stream)
-            .await
-            .ok_or_else(|| SdkError::Auth("no challenge received".into()))?;
-
-        let sig = keypair.sign(challenge.nonce.as_bytes());
-        let sig_b64 = {
-            use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-            use base64::Engine;
-            URL_SAFE_NO_PAD.encode(sig.to_bytes())
-        };
-        let response = AuthResponse {
-            agent_id: keypair.agent_id(),
-            signature: sig_b64,
-        };
-        let json =
-            serde_json::to_string(&response).map_err(|e| SdkError::Protocol(e.to_string()))?;
-        sink.send(Message::text(json))
-            .await
-            .map_err(|e| SdkError::Auth(e.to_string()))?;
-
-        let result: AuthResult = receive_ws_json(&mut stream)
-            .await
-            .ok_or_else(|| SdkError::Auth("no auth result received".into()))?;
-        if !result.success {
-            return Err(SdkError::Auth(
-                result.error.unwrap_or_else(|| "auth failed".into()),
-            ));
-        }
-
-        let session_token = Arc::new(Mutex::new(result.session_token));
+        let session_token_value = challenge_response_auth(&keypair, &mut sink, &mut stream).await?;
+        let session_token = Arc::new(Mutex::new(session_token_value));
 
         let noise_keypair =
             Arc::new(NoiseKeypair::generate().map_err(|e| SdkError::Protocol(e.to_string()))?);
@@ -211,14 +158,15 @@ impl MeshAgent {
         ));
 
         Ok(Self {
-            keypair,
-            noise_keypair,
-            pending,
-            stream_pending,
-            sink,
-            sessions,
+            conn: MeshConnection {
+                keypair,
+                noise_keypair,
+                pending,
+                stream_pending,
+                sink,
+                sessions,
+            },
             acl,
-            session_token,
         })
     }
 
@@ -229,48 +177,7 @@ impl MeshAgent {
         payload: serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, SdkError> {
-        self.ensure_session(target, timeout).await?;
-
-        let plaintext =
-            serde_json::to_vec(&payload).map_err(|e| SdkError::Protocol(e.to_string()))?;
-        let ciphertext_b64 = {
-            let mut sessions = self.sessions.lock().await;
-            let transport = sessions.get_mut(target.as_str()).ok_or_else(|| {
-                SdkError::Protocol("noise session missing after handshake".into())
-            })?;
-            transport
-                .encrypt(&plaintext)
-                .map_err(|e| SdkError::Protocol(format!("encrypt: {e}")))?
-        };
-
-        let envelope = MeshEnvelope::new_encrypted(
-            &self.keypair,
-            target.clone(),
-            MessageType::Request,
-            None,
-            serde_json::Value::String(ciphertext_b64),
-        )
-        .map_err(|e| SdkError::Protocol(e.to_string()))?;
-
-        let msg_id = envelope.id;
-        let response = self.send_and_wait(envelope, msg_id, timeout).await?;
-
-        if response.msg_type == MessageType::Error {
-            if response.encrypted {
-                let decrypted = self.decrypt_payload(target, &response.payload).await?;
-                return Err(SdkError::Remote(
-                    String::from_utf8_lossy(&decrypted).to_string(),
-                ));
-            }
-            return Err(SdkError::Remote(response.payload.to_string()));
-        }
-
-        if response.encrypted {
-            let decrypted = self.decrypt_payload(target, &response.payload).await?;
-            serde_json::from_slice(&decrypted).map_err(|e| SdkError::Protocol(e.to_string()))
-        } else {
-            Ok(response.payload)
-        }
+        self.conn.request(target, payload, timeout).await
     }
 
     /// Send a plaintext request (no encryption).
@@ -280,18 +187,7 @@ impl MeshAgent {
         payload: serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, SdkError> {
-        let envelope =
-            MeshEnvelope::new_signed(&self.keypair, target.clone(), MessageType::Request, payload)
-                .map_err(|e| SdkError::Protocol(e.to_string()))?;
-
-        let msg_id = envelope.id;
-        let response = self.send_and_wait(envelope, msg_id, timeout).await?;
-
-        if response.msg_type == MessageType::Error {
-            Err(SdkError::Remote(response.payload.to_string()))
-        } else {
-            Ok(response.payload)
-        }
+        self.conn.request_plaintext(target, payload, timeout).await
     }
 
     /// Send an encrypted request and receive a streaming response.
@@ -301,232 +197,29 @@ impl MeshAgent {
         payload: serde_json::Value,
         timeout: Duration,
     ) -> Result<crate::StreamReceiver, SdkError> {
-        self.ensure_session(target, timeout).await?;
-
-        let plaintext =
-            serde_json::to_vec(&payload).map_err(|e| SdkError::Protocol(e.to_string()))?;
-        let ciphertext_b64 = {
-            let mut sessions = self.sessions.lock().await;
-            let transport = sessions.get_mut(target.as_str()).ok_or_else(|| {
-                SdkError::Protocol("noise session missing after handshake".into())
-            })?;
-            transport
-                .encrypt(&plaintext)
-                .map_err(|e| SdkError::Protocol(format!("encrypt: {e}")))?
-        };
-
-        let envelope = MeshEnvelope::new_encrypted(
-            &self.keypair,
-            target.clone(),
-            MessageType::StreamRequest,
-            None,
-            serde_json::Value::String(ciphertext_b64),
-        )
-        .map_err(|e| SdkError::Protocol(e.to_string()))?;
-
-        let msg_id = envelope.id;
-        let (tx, rx) = mpsc::unbounded_channel();
-        {
-            let mut sp = self.stream_pending.lock().await;
-            sp.insert(msg_id, tx);
-        }
-
-        let json =
-            serde_json::to_string(&envelope).map_err(|e| SdkError::Protocol(e.to_string()))?;
-        {
-            let mut sink = self.sink.lock().await;
-            sink.send(Message::text(json))
-                .await
-                .map_err(|e| SdkError::Send(e.to_string()))?;
-        }
-
-        // Set up cancel mechanism.
-        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
-        {
-            let keypair = Arc::clone(&self.keypair);
-            let sink = Arc::clone(&self.sink);
-            let target = target.clone();
-            tokio::spawn(async move {
-                if cancel_rx.await.is_ok() {
-                    let cancel = MeshEnvelope::new_signed_reply(
-                        &keypair,
-                        target,
-                        MessageType::Cancel,
-                        Some(msg_id),
-                        serde_json::Value::Null,
-                    );
-                    if let Ok(cancel) = cancel {
-                        if let Ok(json) = serde_json::to_string(&cancel) {
-                            let mut s = sink.lock().await;
-                            let _ = s.send(Message::text(json)).await;
-                        }
-                    }
-                }
-            });
-        }
-
-        Ok(crate::StreamReceiver::new(rx, cancel_tx))
+        self.conn.request_stream(target, payload, timeout).await
     }
 
     pub fn agent_id(&self) -> AgentId {
-        self.keypair.agent_id()
+        self.conn.agent_id()
     }
 
     /// Update the ACL policy at runtime.
     pub async fn update_acl(&self, new_acl: AclPolicy) {
         *self.acl.write().await = new_acl;
     }
-
-    async fn ensure_session(&self, target: &AgentId, timeout: Duration) -> Result<(), SdkError> {
-        {
-            let sessions = self.sessions.lock().await;
-            if sessions.contains_key(target.as_str()) {
-                return Ok(());
-            }
-        }
-
-        let mut handshake = NoiseHandshake::new_initiator(&self.noise_keypair)
-            .map_err(|e| SdkError::Protocol(format!("noise init: {e}")))?;
-
-        let hs_data1 = handshake
-            .write_message()
-            .map_err(|e| SdkError::Protocol(format!("noise write msg1: {e}")))?;
-        let msg1 = MeshEnvelope::new_signed(
-            &self.keypair,
-            target.clone(),
-            MessageType::Handshake,
-            serde_json::Value::String(hs_data1),
-        )
-        .map_err(|e| SdkError::Protocol(e.to_string()))?;
-        let msg1_id = msg1.id;
-
-        let msg2 = self.send_and_wait(msg1, msg1_id, timeout).await?;
-
-        let hs_data2 = msg2
-            .payload
-            .as_str()
-            .ok_or_else(|| SdkError::Protocol("handshake msg2 payload not a string".into()))?;
-        handshake
-            .read_message(hs_data2)
-            .map_err(|e| SdkError::Protocol(format!("noise read msg2: {e}")))?;
-
-        let hs_data3 = handshake
-            .write_message()
-            .map_err(|e| SdkError::Protocol(format!("noise write msg3: {e}")))?;
-        let msg3 = MeshEnvelope::new_signed_reply(
-            &self.keypair,
-            target.clone(),
-            MessageType::Handshake,
-            Some(msg2.id),
-            serde_json::Value::String(hs_data3),
-        )
-        .map_err(|e| SdkError::Protocol(e.to_string()))?;
-
-        let json = serde_json::to_string(&msg3).map_err(|e| SdkError::Protocol(e.to_string()))?;
-        {
-            let mut sink = self.sink.lock().await;
-            sink.send(Message::text(json))
-                .await
-                .map_err(|e| SdkError::Send(e.to_string()))?;
-        }
-
-        let transport = handshake
-            .into_transport()
-            .map_err(|e| SdkError::Protocol(format!("noise transport: {e}")))?;
-        {
-            let mut sessions = self.sessions.lock().await;
-            sessions.insert(target.as_str().to_string(), transport);
-        }
-
-        tracing::info!(target = target.as_str(), "noise handshake complete");
-        Ok(())
-    }
-
-    async fn send_and_wait(
-        &self,
-        envelope: MeshEnvelope,
-        msg_id: Uuid,
-        timeout: Duration,
-    ) -> Result<MeshEnvelope, SdkError> {
-        let target = envelope.to.clone();
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().await;
-            pending.insert(msg_id, tx);
-        }
-
-        let json =
-            serde_json::to_string(&envelope).map_err(|e| SdkError::Protocol(e.to_string()))?;
-        {
-            let mut sink = self.sink.lock().await;
-            sink.send(Message::text(json))
-                .await
-                .map_err(|e| SdkError::Send(e.to_string()))?;
-        }
-
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(_)) => Err(SdkError::Receive("response channel closed".into())),
-            Err(_) => {
-                let mut pending = self.pending.lock().await;
-                pending.remove(&msg_id);
-                self.send_cancel(&target, msg_id).await;
-                Err(SdkError::Timeout)
-            }
-        }
-    }
-
-    async fn send_cancel(&self, target: &AgentId, request_id: Uuid) {
-        let cancel = MeshEnvelope::new_signed_reply(
-            &self.keypair,
-            target.clone(),
-            MessageType::Cancel,
-            Some(request_id),
-            serde_json::Value::Null,
-        );
-        if let Ok(cancel) = cancel {
-            if let Ok(json) = serde_json::to_string(&cancel) {
-                let mut sink = self.sink.lock().await;
-                let _ = sink.send(Message::text(json)).await;
-            }
-        }
-    }
-
-    async fn decrypt_payload(
-        &self,
-        target: &AgentId,
-        payload: &serde_json::Value,
-    ) -> Result<Vec<u8>, SdkError> {
-        let ciphertext = payload
-            .as_str()
-            .ok_or_else(|| SdkError::Protocol("encrypted payload not a string".into()))?;
-        let mut sessions = self.sessions.lock().await;
-        let transport = sessions
-            .get_mut(target.as_str())
-            .ok_or_else(|| SdkError::Protocol("no noise session for decrypt".into()))?;
-        transport
-            .decrypt(ciphertext)
-            .map_err(|e| SdkError::Protocol(format!("decrypt: {e}")))
-    }
 }
 
+// --- Agent-specific reader loop ---
+
 /// Peer Noise session state (for responder side).
-/// Established is never constructed as a variant — completed handshakes move
-/// directly into the shared SessionMap. Kept for symmetry with meshd.
 #[allow(dead_code)]
 enum PeerNoise {
     Handshaking(Box<NoiseHandshake>),
     Established(NoiseTransport),
 }
 
-/// Bidirectional reader loop that handles:
-/// Bidirectional reader loop that handles:
-///
-/// 1. Response matching (in_reply_to → pending)
-/// 2. Noise handshake (responder side)
-/// 3. Incoming requests (ACL check → handler → response)
-///
-/// Wrapper with auto-reconnect.
+/// Bidirectional reader loop wrapper with auto-reconnect.
 #[allow(clippy::too_many_arguments)]
 async fn agent_reader_loop_with_reconnect(
     keypair: Arc<AgentKeypair>,
@@ -541,7 +234,6 @@ async fn agent_reader_loop_with_reconnect(
     handler: Arc<dyn RequestHandler>,
     session_token: Arc<Mutex<Option<String>>>,
 ) {
-    // Run initial reader loop.
     agent_reader_loop(
         stream,
         Arc::new(keypair.as_ref().clone_inner()),
@@ -555,7 +247,6 @@ async fn agent_reader_loop_with_reconnect(
     )
     .await;
 
-    // Attempt session resumption.
     let token = {
         let guard = session_token.lock().await;
         guard.clone()
@@ -563,7 +254,7 @@ async fn agent_reader_loop_with_reconnect(
 
     if let Some(token) = token {
         tracing::info!("agent connection lost, attempting session resumption");
-        match attempt_agent_resume(&keypair, &relay_url, &token).await {
+        match attempt_resume(&keypair, &relay_url, &token).await {
             Ok((new_stream, new_sink_inner, new_token)) => {
                 *sink.lock().await = new_sink_inner;
                 *session_token.lock().await = Some(new_token);
@@ -591,48 +282,7 @@ async fn agent_reader_loop_with_reconnect(
     }
 }
 
-/// Attempt session resumption for a MeshAgent.
-async fn attempt_agent_resume(
-    keypair: &AgentKeypair,
-    relay_url: &str,
-    token: &str,
-) -> Result<
-    (
-        futures_util::stream::SplitStream<WsStream>,
-        futures_util::stream::SplitSink<WsStream, Message>,
-        String,
-    ),
-    SdkError,
-> {
-    let (ws_stream, _) = tokio_tungstenite::connect_async(relay_url)
-        .await
-        .map_err(|e| SdkError::Connection(e.to_string()))?;
-
-    let (mut sink, mut stream) = ws_stream.split();
-
-    let resume = AuthResume {
-        agent_id: keypair.agent_id(),
-        session_token: token.to_string(),
-    };
-    let json = serde_json::to_string(&resume).map_err(|e| SdkError::Protocol(e.to_string()))?;
-    sink.send(Message::text(json))
-        .await
-        .map_err(|e| SdkError::Auth(e.to_string()))?;
-
-    let result: AuthResult = receive_ws_json(&mut stream)
-        .await
-        .ok_or_else(|| SdkError::Auth("no auth result on resume".into()))?;
-
-    if !result.success {
-        return Err(SdkError::Auth(
-            result.error.unwrap_or_else(|| "resume failed".into()),
-        ));
-    }
-
-    let new_token = result.session_token.unwrap_or_default();
-    Ok((stream, sink, new_token))
-}
-
+/// Agent reader loop: handles responses, Noise handshakes (responder), ACL, and request dispatch.
 #[allow(clippy::too_many_arguments)]
 async fn agent_reader_loop(
     mut stream: futures_util::stream::SplitStream<WsStream>,
@@ -645,9 +295,7 @@ async fn agent_reader_loop(
     acl: Arc<RwLock<AclPolicy>>,
     handler: Arc<dyn RequestHandler>,
 ) {
-    // Separate map for handshake-in-progress peers (not yet in sessions).
     let mut handshake_states: HashMap<String, PeerNoise> = HashMap::new();
-    // Active cancel notifiers for in-flight request handlers.
     let mut cancel_tokens: HashMap<Uuid, CancelNotifier> = HashMap::new();
 
     while let Some(msg) = stream.next().await {
@@ -658,13 +306,12 @@ async fn agent_reader_loop(
                     Err(_) => continue,
                 };
 
-                // Verify signature.
                 if envelope.verify().is_err() {
                     tracing::warn!("agent: envelope signature verification failed");
                     continue;
                 }
 
-                // Handle Cancel messages: fire the cancel notifier for the target request.
+                // Handle Cancel messages.
                 if envelope.msg_type == MessageType::Cancel {
                     if let Some(reply_to) = envelope.in_reply_to {
                         if let Some(notifier) = cancel_tokens.remove(&reply_to) {
@@ -679,14 +326,13 @@ async fn agent_reader_loop(
                     continue;
                 }
 
-                // If it's a response to a pending request, deliver it.
+                // Dispatch responses to pending channels.
                 if let Some(reply_to) = envelope.in_reply_to {
-                    // StreamChunk: forward to stream receiver.
                     if envelope.msg_type == MessageType::StreamChunk {
                         let sp = stream_pending.lock().await;
                         if let Some(tx) = sp.get(&reply_to) {
                             let payload = if envelope.encrypted {
-                                match decrypt_in_reader(&envelope, &sessions).await {
+                                match decrypt_envelope_payload(&envelope, &sessions).await {
                                     Ok(v) => v,
                                     Err(e) => {
                                         let _ = tx.send(Err(e));
@@ -701,19 +347,17 @@ async fn agent_reader_loop(
                         continue;
                     }
 
-                    // StreamEnd: close stream channel.
                     if envelope.msg_type == MessageType::StreamEnd {
                         let mut sp = stream_pending.lock().await;
                         sp.remove(&reply_to);
                         continue;
                     }
 
-                    // Error for stream: send error and close.
                     if envelope.msg_type == MessageType::Error {
                         let mut sp = stream_pending.lock().await;
                         if let Some(tx) = sp.remove(&reply_to) {
                             let err_msg = if envelope.encrypted {
-                                match decrypt_in_reader(&envelope, &sessions).await {
+                                match decrypt_envelope_payload(&envelope, &sessions).await {
                                     Ok(v) => v.to_string(),
                                     Err(e) => e.to_string(),
                                 }
@@ -724,10 +368,8 @@ async fn agent_reader_loop(
                             continue;
                         }
                         drop(sp);
-                        // Fall through to regular pending.
                     }
 
-                    // Regular response/handshake.
                     let mut p = pending.lock().await;
                     if let Some(tx) = p.remove(&reply_to) {
                         let _ = tx.send(envelope);
@@ -737,7 +379,7 @@ async fn agent_reader_loop(
 
                 let peer_key = envelope.from.as_str().to_string();
 
-                // Handle Noise handshake messages.
+                // Handle Noise handshake messages (responder side).
                 if envelope.msg_type == MessageType::Handshake {
                     handle_handshake(
                         &envelope,
@@ -824,7 +466,6 @@ async fn agent_reader_loop(
                     let mut val_stream =
                         handler.handle_stream(&envelope.from, &payload, token).await;
                     while let Some(chunk) = val_stream.next().await {
-                        // Check cancellation between chunks.
                         if !cancel_tokens.contains_key(&envelope.id) {
                             tracing::debug!("stream cancelled, stopping chunk emission");
                             break;
@@ -843,7 +484,6 @@ async fn agent_reader_loop(
                         .await;
                     }
                     cancel_tokens.remove(&envelope.id);
-                    // Send StreamEnd.
                     let _ = send_response(
                         &keypair,
                         &sink,
@@ -887,24 +527,7 @@ async fn agent_reader_loop(
     }
 }
 
-/// Decrypt an envelope's payload using the Noise session for the sender (agent reader context).
-async fn decrypt_in_reader(
-    envelope: &MeshEnvelope,
-    sessions: &SessionMap,
-) -> Result<serde_json::Value, SdkError> {
-    let ct = envelope
-        .payload
-        .as_str()
-        .ok_or_else(|| SdkError::Protocol("encrypted payload not a string".into()))?;
-    let mut sess = sessions.lock().await;
-    let transport = sess
-        .get_mut(envelope.from.as_str())
-        .ok_or_else(|| SdkError::Protocol("no noise session for decrypt".into()))?;
-    let pt = transport
-        .decrypt(ct)
-        .map_err(|e| SdkError::Protocol(format!("decrypt: {e}")))?;
-    serde_json::from_slice(&pt).map_err(|e| SdkError::Protocol(e.to_string()))
-}
+// --- Agent-specific helpers ---
 
 async fn handle_handshake(
     envelope: &MeshEnvelope,
@@ -1012,13 +635,4 @@ async fn send_response(
     let json = serde_json::to_string(&response).map_err(|e| e.to_string())?;
     let mut s = sink.lock().await;
     s.send(Message::text(json)).await.map_err(|e| e.to_string())
-}
-
-async fn receive_ws_json<T: serde::de::DeserializeOwned>(
-    stream: &mut futures_util::stream::SplitStream<WsStream>,
-) -> Option<T> {
-    match stream.next().await {
-        Some(Ok(Message::Text(text))) => serde_json::from_str(&text).ok(),
-        _ => None,
-    }
 }
