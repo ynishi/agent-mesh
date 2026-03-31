@@ -23,6 +23,11 @@ const DEAD_THRESHOLD: Duration = Duration::from_secs(90);
 /// Session token TTL for connection resumption.
 const SESSION_TOKEN_TTL: Duration = Duration::from_secs(300); // 5 minutes
 
+/// Default rate limit: messages per second per agent.
+const DEFAULT_RATE_LIMIT: f64 = 50.0;
+/// Token bucket burst size (max tokens that can accumulate).
+const DEFAULT_RATE_BURST: f64 = 100.0;
+
 /// Stored session for connection resumption.
 struct StoredSession {
     agent_id: String,
@@ -33,6 +38,40 @@ struct StoredSession {
 struct BufferedMessage {
     json: String,
     enqueued_at: Instant,
+}
+
+/// Token bucket for per-agent rate limiting.
+struct TokenBucket {
+    tokens: f64,
+    last_refill: Instant,
+    rate: f64,  // tokens per second
+    burst: f64, // max tokens
+}
+
+impl TokenBucket {
+    fn new(rate: f64, burst: f64) -> Self {
+        Self {
+            tokens: burst,
+            last_refill: Instant::now(),
+            rate,
+            burst,
+        }
+    }
+
+    /// Try to consume one token. Returns true if allowed.
+    fn try_consume(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.rate).min(self.burst);
+        self.last_refill = now;
+
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Connected agent session.
@@ -51,10 +90,15 @@ pub struct Hub {
     revoked: RwLock<HashSet<String>>,
     /// Session tokens for connection resumption: token → StoredSession.
     session_tokens: RwLock<HashMap<String, StoredSession>>,
+    /// Per-agent rate limiters (token buckets).
+    rate_limiters: Mutex<HashMap<String, TokenBucket>>,
+    rate_limit: f64,
+    rate_burst: f64,
     /// Counters for metrics.
     pub messages_routed: AtomicU64,
     pub messages_buffered: AtomicU64,
     pub messages_dropped: AtomicU64,
+    pub messages_rate_limited: AtomicU64,
     pub auth_successes: AtomicU64,
     pub auth_failures: AtomicU64,
 }
@@ -67,18 +111,28 @@ pub enum RouteResult {
     Buffered,
     /// Target offline; buffer full, message dropped.
     BufferFull,
+    /// Sender exceeded rate limit.
+    RateLimited,
 }
 
 impl Hub {
     pub fn new() -> Self {
+        Self::with_rate_limit(DEFAULT_RATE_LIMIT, DEFAULT_RATE_BURST)
+    }
+
+    pub fn with_rate_limit(rate: f64, burst: f64) -> Self {
         Self {
             agents: RwLock::new(HashMap::new()),
             buffers: RwLock::new(HashMap::new()),
             revoked: RwLock::new(HashSet::new()),
             session_tokens: RwLock::new(HashMap::new()),
+            rate_limiters: Mutex::new(HashMap::new()),
+            rate_limit: rate,
+            rate_burst: burst,
             messages_routed: AtomicU64::new(0),
             messages_buffered: AtomicU64::new(0),
             messages_dropped: AtomicU64::new(0),
+            messages_rate_limited: AtomicU64::new(0),
             auth_successes: AtomicU64::new(0),
             auth_failures: AtomicU64::new(0),
         }
@@ -175,6 +229,19 @@ impl Hub {
             }
             if revoked.contains(envelope.to.as_str()) {
                 return Err(format!("target {} is revoked", envelope.to));
+            }
+        }
+
+        // Rate limit check (per sender).
+        {
+            let sender_key = envelope.from.as_str().to_string();
+            let mut limiters = self.rate_limiters.lock().await;
+            let bucket = limiters
+                .entry(sender_key)
+                .or_insert_with(|| TokenBucket::new(self.rate_limit, self.rate_burst));
+            if !bucket.try_consume() {
+                self.messages_rate_limited.fetch_add(1, Ordering::Relaxed);
+                return Ok(RouteResult::RateLimited);
             }
         }
 

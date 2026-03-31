@@ -26,11 +26,18 @@ type WsSink = futures_util::stream::SplitSink<WsStream, Message>;
 /// Receiver for a streaming response. Yields chunks until the stream ends.
 pub struct StreamReceiver {
     rx: mpsc::UnboundedReceiver<Result<serde_json::Value, SdkError>>,
+    cancel_tx: Option<oneshot::Sender<()>>,
 }
 
 impl StreamReceiver {
-    pub(crate) fn new(rx: mpsc::UnboundedReceiver<Result<serde_json::Value, SdkError>>) -> Self {
-        Self { rx }
+    pub(crate) fn new(
+        rx: mpsc::UnboundedReceiver<Result<serde_json::Value, SdkError>>,
+        cancel_tx: oneshot::Sender<()>,
+    ) -> Self {
+        Self {
+            rx,
+            cancel_tx: Some(cancel_tx),
+        }
     }
 
     /// Receive the next chunk. Returns None when the stream ends.
@@ -45,6 +52,14 @@ impl StreamReceiver {
             chunks.push(result?);
         }
         Ok(chunks)
+    }
+
+    /// Cancel the stream. Sends a Cancel message to the remote agent.
+    pub fn cancel(mut self) {
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        // Dropping rx closes the channel.
     }
 }
 
@@ -252,7 +267,32 @@ impl MeshClient {
                 .map_err(|e| SdkError::Send(e.to_string()))?;
         }
 
-        Ok(StreamReceiver { rx })
+        // Set up cancel: when cancel_tx fires, send Cancel envelope.
+        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+        {
+            let keypair = Arc::clone(&self.keypair);
+            let sink = Arc::clone(&self.sink);
+            let target = target.clone();
+            tokio::spawn(async move {
+                if cancel_rx.await.is_ok() {
+                    let cancel = MeshEnvelope::new_signed_reply(
+                        &keypair,
+                        target,
+                        MessageType::Cancel,
+                        Some(msg_id),
+                        serde_json::Value::Null,
+                    );
+                    if let Ok(cancel) = cancel {
+                        if let Ok(json) = serde_json::to_string(&cancel) {
+                            let mut s = sink.lock().await;
+                            let _ = s.send(Message::text(json)).await;
+                        }
+                    }
+                }
+            });
+        }
+
+        Ok(StreamReceiver::new(rx, cancel_tx))
     }
 
     /// Send a plaintext request (no encryption). For backward compatibility.
@@ -356,12 +396,14 @@ impl MeshClient {
     }
 
     /// Send an envelope and wait for the response matched by in_reply_to.
+    /// On timeout, sends a Cancel message to the target.
     async fn send_and_wait(
         &self,
         envelope: MeshEnvelope,
         msg_id: Uuid,
         timeout: Duration,
     ) -> Result<MeshEnvelope, SdkError> {
+        let target = envelope.to.clone();
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
@@ -383,7 +425,26 @@ impl MeshClient {
             Err(_) => {
                 let mut pending = self.pending.lock().await;
                 pending.remove(&msg_id);
+                // Send Cancel to target.
+                self.send_cancel(&target, msg_id).await;
                 Err(SdkError::Timeout)
+            }
+        }
+    }
+
+    /// Send a Cancel message for a given request ID.
+    async fn send_cancel(&self, target: &AgentId, request_id: Uuid) {
+        let cancel = MeshEnvelope::new_signed_reply(
+            &self.keypair,
+            target.clone(),
+            MessageType::Cancel,
+            Some(request_id),
+            serde_json::Value::Null,
+        );
+        if let Ok(cancel) = cancel {
+            if let Ok(json) = serde_json::to_string(&cancel) {
+                let mut sink = self.sink.lock().await;
+                let _ = sink.send(Message::text(json)).await;
             }
         }
     }

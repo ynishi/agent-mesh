@@ -22,4 +22,10 @@ pub enum SdkError {
 
     #[error("remote error: {0}")]
     Remote(String),
+
+    #[error("request cancelled")]
+    Cancelled,
+
+    #[error("rate limited")]
+    RateLimited,
 }

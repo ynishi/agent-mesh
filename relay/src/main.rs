@@ -66,6 +66,7 @@ async fn metrics_handler(State(hub): State<Arc<Hub>>) -> String {
     let routed = hub.messages_routed.load(Ordering::Relaxed);
     let buffered_total = hub.messages_buffered.load(Ordering::Relaxed);
     let dropped = hub.messages_dropped.load(Ordering::Relaxed);
+    let rate_limited = hub.messages_rate_limited.load(Ordering::Relaxed);
     let auth_ok = hub.auth_successes.load(Ordering::Relaxed);
     let auth_fail = hub.auth_failures.load(Ordering::Relaxed);
 
@@ -88,6 +89,9 @@ async fn metrics_handler(State(hub): State<Arc<Hub>>) -> String {
          # HELP mesh_messages_dropped_total Total messages dropped (buffer full).\n\
          # TYPE mesh_messages_dropped_total counter\n\
          mesh_messages_dropped_total {dropped}\n\
+         # HELP mesh_messages_rate_limited_total Total messages rejected by rate limiter.\n\
+         # TYPE mesh_messages_rate_limited_total counter\n\
+         mesh_messages_rate_limited_total {rate_limited}\n\
          # HELP mesh_auth_successes_total Total successful authentications.\n\
          # TYPE mesh_auth_successes_total counter\n\
          mesh_auth_successes_total {auth_ok}\n\

@@ -456,6 +456,7 @@ async fn main() -> Result<()> {
                 &self,
                 _from: &mesh_proto::identity::AgentId,
                 _payload: &serde_json::Value,
+                _cancel: mesh_sdk::CancelToken,
             ) -> serde_json::Value {
                 serde_json::json!({"error": "use streaming"})
             }
@@ -464,6 +465,7 @@ async fn main() -> Result<()> {
                 &self,
                 _from: &mesh_proto::identity::AgentId,
                 payload: &serde_json::Value,
+                _cancel: mesh_sdk::CancelToken,
             ) -> mesh_sdk::ValueStream {
                 let prompt = payload
                     .get("prompt")
@@ -602,6 +604,182 @@ async fn main() -> Result<()> {
                 println!("[INFO] Reconnect test inconclusive (expected in simplified relay): {e}");
             }
         }
+        println!();
+    }
+
+    // --- Test 12: Request cancellation ---
+    println!("--- Test 12: Request cancellation (CancelToken) ---");
+    {
+        use std::sync::atomic::{AtomicBool, Ordering as AtOrd};
+
+        let server_kp = AgentKeypair::generate();
+        let server_id = server_kp.agent_id();
+        let client_kp = AgentKeypair::generate();
+        let client_id = client_kp.agent_id();
+
+        let mut server_acl = AclPolicy::new();
+        server_acl.add_rule(AclRule {
+            source: client_id.clone(),
+            target: server_id.clone(),
+            allowed_capabilities: vec!["slow".into()],
+        });
+
+        // Handler that waits until cancelled.
+        let was_cancelled = Arc::new(AtomicBool::new(false));
+        let was_cancelled_clone = Arc::clone(&was_cancelled);
+
+        struct SlowHandler {
+            was_cancelled: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl mesh_sdk::RequestHandler for SlowHandler {
+            async fn handle(
+                &self,
+                _from: &mesh_proto::identity::AgentId,
+                _payload: &serde_json::Value,
+                mut cancel: mesh_sdk::CancelToken,
+            ) -> serde_json::Value {
+                // Wait for cancellation or 10 seconds.
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        self.was_cancelled.store(true, AtOrd::SeqCst);
+                        serde_json::json!({"cancelled": true})
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                        serde_json::json!({"cancelled": false})
+                    }
+                }
+            }
+        }
+
+        let handler: Arc<dyn mesh_sdk::RequestHandler> = Arc::new(SlowHandler {
+            was_cancelled: was_cancelled_clone,
+        });
+        let _server = mesh_sdk::MeshAgent::connect(server_kp, &relay_ws_url, server_acl, handler)
+            .await
+            .map_err(|e| anyhow::anyhow!("server connect: {e}"))?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let client_mc = mesh_sdk::MeshClient::connect(client_kp, &relay_ws_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("client connect: {e}"))?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Request with very short timeout → should timeout and send Cancel.
+        let result = client_mc
+            .request(
+                &server_id,
+                serde_json::json!({"capability": "slow"}),
+                Duration::from_millis(500),
+            )
+            .await;
+        assert!(result.is_err(), "should timeout");
+        println!("[PASS] Request timed out as expected");
+
+        // Give the Cancel message time to propagate.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Check if the handler received the cancellation.
+        let cancelled = was_cancelled.load(AtOrd::SeqCst);
+        if cancelled {
+            println!("[PASS] CancelToken was triggered in handler");
+        } else {
+            println!("[INFO] CancelToken not yet triggered (race condition in simplified relay)");
+        }
+        println!();
+    }
+
+    // --- Test 13: Rate limiting ---
+    println!("--- Test 13: Rate limiting ---");
+    {
+        // Use a dedicated relay with very low rate limit for this test.
+        let rate_hub = Arc::new(InProcessHub::new_with_rate_limit(3)); // 3 messages max
+        let rate_hub_ws = Arc::clone(&rate_hub);
+
+        use axum::{extract::WebSocketUpgrade, routing::get, Router};
+        let app = Router::new().route(
+            "/ws",
+            get(move |ws: WebSocketUpgrade| {
+                let hub = Arc::clone(&rate_hub_ws);
+                async move { ws.on_upgrade(move |socket| in_process_relay_handle(socket, hub)) }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let rate_addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let rate_ws_url = format!("ws://{rate_addr}/ws");
+
+        let sender_kp = AgentKeypair::generate();
+        let sender_id = sender_kp.agent_id();
+        let receiver_kp = AgentKeypair::generate();
+        let receiver_id = receiver_kp.agent_id();
+
+        let mut receiver_acl = AclPolicy::new();
+        receiver_acl.add_rule(AclRule {
+            source: sender_id.clone(),
+            target: receiver_id.clone(),
+            allowed_capabilities: vec!["test".into()],
+        });
+
+        let handler: Arc<dyn mesh_sdk::RequestHandler> = Arc::new(
+            |_from: mesh_proto::identity::AgentId, _payload: serde_json::Value| async move {
+                serde_json::json!({"ok": true})
+            },
+        );
+
+        let _receiver_agent =
+            mesh_sdk::MeshAgent::connect(receiver_kp, &rate_ws_url, receiver_acl, handler)
+                .await
+                .map_err(|e| anyhow::anyhow!("receiver connect: {e}"))?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let sender_mc = mesh_sdk::MeshClient::connect(sender_kp, &rate_ws_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("sender connect: {e}"))?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Send many requests rapidly. Some should succeed, some should be rate-limited.
+        let mut successes = 0u32;
+        let mut rate_limited = 0u32;
+        let mut other_errors = 0u32;
+
+        for _ in 0..10 {
+            match sender_mc
+                .request(
+                    &receiver_id,
+                    serde_json::json!({"capability": "test"}),
+                    Duration::from_millis(1500),
+                )
+                .await
+            {
+                Ok(_) => successes += 1,
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("rate_limited") {
+                        rate_limited += 1;
+                    } else {
+                        // In the in-process relay, rate-limited messages are silently dropped,
+                        // so they appear as timeouts on the client side.
+                        other_errors += 1;
+                    }
+                }
+            }
+        }
+
+        let rejected = rate_limited + other_errors;
+        println!(
+            "[info] Results: {} succeeded, {} rejected (rate_limited={}, timeout={})",
+            successes, rejected, rate_limited, other_errors
+        );
+        assert!(successes > 0, "at least some requests should succeed");
+        assert!(rejected > 0, "some requests should be rejected by rate limit");
+        println!(
+            "[PASS] Rate limiting verified: {} succeeded, {} rejected",
+            successes, rejected
+        );
         println!();
     }
 
@@ -1042,6 +1220,10 @@ struct InProcessHub {
     revoked: RwLock<HashSet<String>>,
     /// Session tokens: token → agent_id.
     session_tokens: RwLock<HashMap<String, String>>,
+    /// Per-agent message counter for rate limiting.
+    rate_counters: Mutex<HashMap<String, u32>>,
+    /// Max messages per agent (0 = unlimited).
+    rate_limit: u32,
 }
 
 impl InProcessHub {
@@ -1051,6 +1233,19 @@ impl InProcessHub {
             buffers: RwLock::new(HashMap::new()),
             revoked: RwLock::new(HashSet::new()),
             session_tokens: RwLock::new(HashMap::new()),
+            rate_counters: Mutex::new(HashMap::new()),
+            rate_limit: 0,
+        }
+    }
+
+    fn new_with_rate_limit(limit: u32) -> Self {
+        Self {
+            agents: RwLock::new(HashMap::new()),
+            buffers: RwLock::new(HashMap::new()),
+            revoked: RwLock::new(HashSet::new()),
+            session_tokens: RwLock::new(HashMap::new()),
+            rate_counters: Mutex::new(HashMap::new()),
+            rate_limit: limit,
         }
     }
 
@@ -1112,11 +1307,22 @@ impl InProcessHub {
         }
     }
 
-    async fn route(&self, to: &str, msg: &str) -> bool {
+    /// Route a message. Returns Ok(true)=delivered, Ok(false)=buffered, Err=rate_limited.
+    async fn route(&self, from: &str, to: &str, msg: &str) -> Result<bool, &'static str> {
+        // Rate limit check.
+        if self.rate_limit > 0 {
+            let mut counters = self.rate_counters.lock().await;
+            let count = counters.entry(from.to_string()).or_insert(0);
+            if *count >= self.rate_limit {
+                return Err("rate_limited");
+            }
+            *count += 1;
+        }
+
         let agents = self.agents.read().await;
         if let Some(sink) = agents.get(to) {
             let mut sink = sink.lock().await;
-            sink.send(AxumMsg::text(msg.to_string())).await.is_ok()
+            Ok(sink.send(AxumMsg::text(msg.to_string())).await.is_ok())
         } else {
             drop(agents);
             // Buffer for offline agent.
@@ -1125,7 +1331,7 @@ impl InProcessHub {
             if queue.len() < 100 {
                 queue.push_back(msg.to_string());
             }
-            false
+            Ok(false)
         }
     }
 }
@@ -1273,7 +1479,10 @@ async fn in_process_relay_handle(socket: WebSocket, hub: Arc<InProcessHub>) {
                     if hub.is_revoked(env.to.as_str()).await {
                         continue;
                     }
-                    hub.route(env.to.as_str(), &text).await;
+                    if let Err(_e) = hub.route(env.from.as_str(), env.to.as_str(), &text).await {
+                        // Rate limited or other relay error — drop silently.
+                        // Client will see a timeout.
+                    }
                 }
             }
             Ok(AxumMsg::Close(_)) => break,

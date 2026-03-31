@@ -50,6 +50,8 @@ pub enum MessageType {
     StreamChunk,
     /// Signals the end of a streaming response.
     StreamEnd,
+    /// Cancel a pending request or stream. `in_reply_to` identifies the target request.
+    Cancel,
 }
 
 /// The part of the envelope that gets signed.

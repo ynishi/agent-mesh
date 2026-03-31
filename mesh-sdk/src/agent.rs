@@ -29,30 +29,88 @@ type WsStream =
 pub type ValueStream =
     Pin<Box<dyn futures_util::Stream<Item = serde_json::Value> + Send + 'static>>;
 
+/// Cancellation token for request handlers.
+///
+/// Check `is_cancelled()` periodically in long-running handlers to support
+/// early termination when the client cancels or times out.
+#[derive(Clone)]
+pub struct CancelToken {
+    rx: tokio::sync::watch::Receiver<bool>,
+}
+
+impl CancelToken {
+    fn new() -> (CancelNotifier, Self) {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        (CancelNotifier(tx), Self { rx })
+    }
+
+    /// Returns true if the request has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        *self.rx.borrow()
+    }
+
+    /// Wait until cancelled. Completes immediately if already cancelled.
+    pub async fn cancelled(&mut self) {
+        // If already cancelled, return immediately.
+        if *self.rx.borrow() {
+            return;
+        }
+        // Wait for the value to change to true.
+        let _ = self.rx.changed().await;
+    }
+}
+
+/// Internal handle to trigger cancellation.
+struct CancelNotifier(tokio::sync::watch::Sender<bool>);
+
+impl CancelNotifier {
+    fn cancel(&self) {
+        let _ = self.0.send(true);
+    }
+}
+
 /// Handler for incoming requests.
 ///
 /// Implement this trait to define how the agent responds to requests.
 /// Override `handle_stream` to support streaming responses.
+/// The `cancel` token allows checking if the client has cancelled the request.
 #[async_trait::async_trait]
 pub trait RequestHandler: Send + Sync + 'static {
-    async fn handle(&self, from: &AgentId, payload: &serde_json::Value) -> serde_json::Value;
+    async fn handle(
+        &self,
+        from: &AgentId,
+        payload: &serde_json::Value,
+        cancel: CancelToken,
+    ) -> serde_json::Value;
 
     /// Handle a streaming request. Returns a stream of JSON chunks.
     /// Default: wraps `handle()` as a single-item stream.
-    async fn handle_stream(&self, from: &AgentId, payload: &serde_json::Value) -> ValueStream {
-        let val = self.handle(from, payload).await;
+    async fn handle_stream(
+        &self,
+        from: &AgentId,
+        payload: &serde_json::Value,
+        cancel: CancelToken,
+    ) -> ValueStream {
+        let val = self.handle(from, payload, cancel).await;
         Box::pin(futures_util::stream::once(async move { val }))
     }
 }
 
 /// Async function handler — convenience wrapper.
+/// The closure signature is `Fn(AgentId, serde_json::Value) -> Future<Output = Value>`.
+/// CancelToken is not passed to keep the simple closure API; use the trait directly for cancellation.
 #[async_trait::async_trait]
 impl<F, Fut> RequestHandler for F
 where
     F: Fn(AgentId, serde_json::Value) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = serde_json::Value> + Send + 'static,
 {
-    async fn handle(&self, from: &AgentId, payload: &serde_json::Value) -> serde_json::Value {
+    async fn handle(
+        &self,
+        from: &AgentId,
+        payload: &serde_json::Value,
+        _cancel: CancelToken,
+    ) -> serde_json::Value {
         (self)(from.clone(), payload.clone()).await
     }
 }
@@ -282,7 +340,32 @@ impl MeshAgent {
                 .map_err(|e| SdkError::Send(e.to_string()))?;
         }
 
-        Ok(crate::StreamReceiver::new(rx))
+        // Set up cancel mechanism.
+        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+        {
+            let keypair = Arc::clone(&self.keypair);
+            let sink = Arc::clone(&self.sink);
+            let target = target.clone();
+            tokio::spawn(async move {
+                if cancel_rx.await.is_ok() {
+                    let cancel = MeshEnvelope::new_signed_reply(
+                        &keypair,
+                        target,
+                        MessageType::Cancel,
+                        Some(msg_id),
+                        serde_json::Value::Null,
+                    );
+                    if let Ok(cancel) = cancel {
+                        if let Ok(json) = serde_json::to_string(&cancel) {
+                            let mut s = sink.lock().await;
+                            let _ = s.send(Message::text(json)).await;
+                        }
+                    }
+                }
+            });
+        }
+
+        Ok(crate::StreamReceiver::new(rx, cancel_tx))
     }
 
     pub fn agent_id(&self) -> AgentId {
@@ -365,6 +448,7 @@ impl MeshAgent {
         msg_id: Uuid,
         timeout: Duration,
     ) -> Result<MeshEnvelope, SdkError> {
+        let target = envelope.to.clone();
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
@@ -386,7 +470,24 @@ impl MeshAgent {
             Err(_) => {
                 let mut pending = self.pending.lock().await;
                 pending.remove(&msg_id);
+                self.send_cancel(&target, msg_id).await;
                 Err(SdkError::Timeout)
+            }
+        }
+    }
+
+    async fn send_cancel(&self, target: &AgentId, request_id: Uuid) {
+        let cancel = MeshEnvelope::new_signed_reply(
+            &self.keypair,
+            target.clone(),
+            MessageType::Cancel,
+            Some(request_id),
+            serde_json::Value::Null,
+        );
+        if let Ok(cancel) = cancel {
+            if let Ok(json) = serde_json::to_string(&cancel) {
+                let mut sink = self.sink.lock().await;
+                let _ = sink.send(Message::text(json)).await;
             }
         }
     }
@@ -419,10 +520,13 @@ enum PeerNoise {
 }
 
 /// Bidirectional reader loop that handles:
+/// Bidirectional reader loop that handles:
+///
 /// 1. Response matching (in_reply_to → pending)
 /// 2. Noise handshake (responder side)
 /// 3. Incoming requests (ACL check → handler → response)
-/// Agent reader loop wrapper with auto-reconnect.
+///
+/// Wrapper with auto-reconnect.
 #[allow(clippy::too_many_arguments)]
 async fn agent_reader_loop_with_reconnect(
     keypair: Arc<AgentKeypair>,
@@ -543,6 +647,8 @@ async fn agent_reader_loop(
 ) {
     // Separate map for handshake-in-progress peers (not yet in sessions).
     let mut handshake_states: HashMap<String, PeerNoise> = HashMap::new();
+    // Active cancel notifiers for in-flight request handlers.
+    let mut cancel_tokens: HashMap<Uuid, CancelNotifier> = HashMap::new();
 
     while let Some(msg) = stream.next().await {
         match msg {
@@ -555,6 +661,21 @@ async fn agent_reader_loop(
                 // Verify signature.
                 if envelope.verify().is_err() {
                     tracing::warn!("agent: envelope signature verification failed");
+                    continue;
+                }
+
+                // Handle Cancel messages: fire the cancel notifier for the target request.
+                if envelope.msg_type == MessageType::Cancel {
+                    if let Some(reply_to) = envelope.in_reply_to {
+                        if let Some(notifier) = cancel_tokens.remove(&reply_to) {
+                            notifier.cancel();
+                            tracing::debug!(
+                                request_id = %reply_to,
+                                from = envelope.from.as_str(),
+                                "request cancelled by client"
+                            );
+                        }
+                    }
                     continue;
                 }
 
@@ -698,8 +819,16 @@ async fn agent_reader_loop(
 
                 // StreamRequest: call handle_stream, send chunks.
                 if envelope.msg_type == MessageType::StreamRequest {
-                    let mut val_stream = handler.handle_stream(&envelope.from, &payload).await;
+                    let (notifier, token) = CancelToken::new();
+                    cancel_tokens.insert(envelope.id, notifier);
+                    let mut val_stream =
+                        handler.handle_stream(&envelope.from, &payload, token).await;
                     while let Some(chunk) = val_stream.next().await {
+                        // Check cancellation between chunks.
+                        if !cancel_tokens.contains_key(&envelope.id) {
+                            tracing::debug!("stream cancelled, stopping chunk emission");
+                            break;
+                        }
                         let _ = send_response(
                             &keypair,
                             &sink,
@@ -713,6 +842,7 @@ async fn agent_reader_loop(
                         )
                         .await;
                     }
+                    cancel_tokens.remove(&envelope.id);
                     // Send StreamEnd.
                     let _ = send_response(
                         &keypair,
@@ -730,7 +860,10 @@ async fn agent_reader_loop(
                 }
 
                 // Regular Request: call handler, send single response.
-                let response_payload = handler.handle(&envelope.from, &payload).await;
+                let (notifier, token) = CancelToken::new();
+                cancel_tokens.insert(envelope.id, notifier);
+                let response_payload = handler.handle(&envelope.from, &payload, token).await;
+                cancel_tokens.remove(&envelope.id);
                 let _ = send_response(
                     &keypair,
                     &sink,

@@ -320,6 +320,10 @@ async fn handle_text_message(hub: &Hub, sender: &AgentId, text: &str) -> Result<
             );
             Err(format!("target {} offline and buffer full", envelope.to))
         }
+        Ok(RouteResult::RateLimited) => {
+            tracing::warn!(from = sender.as_str(), "rate limited");
+            Err("rate_limited".to_string())
+        }
         Err(e) => Err(e),
     }
 }
