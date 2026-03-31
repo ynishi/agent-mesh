@@ -3,6 +3,9 @@ name = "meshctl"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "CLI for agent-mesh: keygen, register, discover, request, revoke"
 
 [[bin]]
 name = "meshctl"

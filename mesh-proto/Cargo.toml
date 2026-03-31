@@ -3,6 +3,9 @@ name = "mesh-proto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Protocol types for agent-mesh: identity, messages, ACL, Noise handshake"
 
 [dependencies]
 serde = { workspace = true }

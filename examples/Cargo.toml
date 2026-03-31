@@ -3,6 +3,9 @@ name = "examples"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "E2E demo for agent-mesh"
 publish = false
 
 [[bin]]
