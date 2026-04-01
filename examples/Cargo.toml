@@ -13,8 +13,8 @@ name = "e2e-demo"
 path = "src/bin/e2e_demo.rs"
 
 [dependencies]
-mesh-proto = { workspace = true }
-mesh-sdk = { workspace = true }
+agent-mesh-core = { workspace = true }
+agent-mesh-sdk = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tokio-tungstenite = { workspace = true }

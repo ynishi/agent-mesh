@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
+use agent_mesh_core::agent_card::{AgentCard, AgentCardQuery, AgentCardRegistration};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use mesh_proto::agent_card::{AgentCard, AgentCardQuery, AgentCardRegistration};
 use uuid::Uuid;
 
 use crate::AppState;

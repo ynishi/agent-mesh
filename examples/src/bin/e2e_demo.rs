@@ -9,12 +9,12 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use agent_mesh_core::acl::{AclPolicy, AclRule};
+use agent_mesh_core::agent_card::{AgentCardRegistration, Capability};
+use agent_mesh_core::identity::AgentKeypair;
+use agent_mesh_core::message::{KeyRevocation, MeshEnvelope, MessageType};
+use agent_mesh_core::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
 use anyhow::Result;
-use mesh_proto::acl::{AclPolicy, AclRule};
-use mesh_proto::agent_card::{AgentCardRegistration, Capability};
-use mesh_proto::identity::AgentKeypair;
-use mesh_proto::message::{KeyRevocation, MeshEnvelope, MessageType};
-use mesh_proto::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
 
     // --- Test 3: Alice → Bob (encrypted scheduling request) ---
     println!("--- Test 3: Alice → Relay → Bob (E2E encrypted) ---");
-    let mesh_client = mesh_sdk::MeshClient::connect(alice_kp, &relay_ws_url)
+    let mesh_client = agent_mesh_sdk::MeshClient::connect(alice_kp, &relay_ws_url)
         .await
         .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -170,7 +170,7 @@ async fn main() -> Result<()> {
         )
         .await;
     match acl_result {
-        Err(mesh_sdk::SdkError::Remote(msg)) => {
+        Err(agent_mesh_sdk::SdkError::Remote(msg)) => {
             assert!(
                 msg.contains("acl_denied"),
                 "expected acl_denied, got: {msg}"
@@ -197,7 +197,7 @@ async fn main() -> Result<()> {
 
         // Spawn request to Bob2 (offline). Relay will buffer it.
         let buffer_task = tokio::spawn(async move {
-            let mc = mesh_sdk::MeshClient::connect(alice2_kp, &relay_url_buf)
+            let mc = agent_mesh_sdk::MeshClient::connect(alice2_kp, &relay_url_buf)
                 .await
                 .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -305,7 +305,7 @@ async fn main() -> Result<()> {
 
         // Verify: attempting to send to revoked agent fails (route blocked).
         // Connect attacker and try to send plaintext to victim.
-        let attacker_mc = mesh_sdk::MeshClient::connect(attacker_kp, &relay_ws_url)
+        let attacker_mc = agent_mesh_sdk::MeshClient::connect(attacker_kp, &relay_ws_url)
             .await
             .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -338,8 +338,8 @@ async fn main() -> Result<()> {
         });
 
         // Handler: echoes the request payload with "handled_by: mesh_agent".
-        let handler: Arc<dyn mesh_sdk::RequestHandler> = Arc::new(
-            |_from: mesh_proto::identity::AgentId, payload: serde_json::Value| async move {
+        let handler: Arc<dyn agent_mesh_sdk::RequestHandler> = Arc::new(
+            |_from: agent_mesh_core::identity::AgentId, payload: serde_json::Value| async move {
                 let capability = payload
                     .get("capability")
                     .and_then(|v| v.as_str())
@@ -358,13 +358,13 @@ async fn main() -> Result<()> {
 
         // Connect server as MeshAgent.
         let server_agent =
-            mesh_sdk::MeshAgent::connect(server_kp, &relay_ws_url, server_acl, handler)
+            agent_mesh_sdk::MeshAgent::connect(server_kp, &relay_ws_url, server_acl, handler)
                 .await
                 .map_err(|e| anyhow::anyhow!("server connect: {e}"))?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Connect client as MeshClient.
-        let client_mc = mesh_sdk::MeshClient::connect(client_kp, &relay_ws_url)
+        let client_mc = agent_mesh_sdk::MeshClient::connect(client_kp, &relay_ws_url)
             .await
             .map_err(|e| anyhow::anyhow!("client connect: {e}"))?;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -413,7 +413,7 @@ async fn main() -> Result<()> {
             )
             .await;
         match acl_result {
-            Err(mesh_sdk::SdkError::Remote(msg)) => {
+            Err(agent_mesh_sdk::SdkError::Remote(msg)) => {
                 assert!(
                     msg.contains("acl_denied"),
                     "expected acl_denied, got: {msg}"
@@ -451,22 +451,22 @@ async fn main() -> Result<()> {
         struct StreamingHandler;
 
         #[async_trait::async_trait]
-        impl mesh_sdk::RequestHandler for StreamingHandler {
+        impl agent_mesh_sdk::RequestHandler for StreamingHandler {
             async fn handle(
                 &self,
-                _from: &mesh_proto::identity::AgentId,
+                _from: &agent_mesh_core::identity::AgentId,
                 _payload: &serde_json::Value,
-                _cancel: mesh_sdk::CancelToken,
+                _cancel: agent_mesh_sdk::CancelToken,
             ) -> serde_json::Value {
                 serde_json::json!({"error": "use streaming"})
             }
 
             async fn handle_stream(
                 &self,
-                _from: &mesh_proto::identity::AgentId,
+                _from: &agent_mesh_core::identity::AgentId,
                 payload: &serde_json::Value,
-                _cancel: mesh_sdk::CancelToken,
-            ) -> mesh_sdk::ValueStream {
+                _cancel: agent_mesh_sdk::CancelToken,
+            ) -> agent_mesh_sdk::ValueStream {
                 let prompt = payload
                     .get("prompt")
                     .and_then(|v| v.as_str())
@@ -481,13 +481,14 @@ async fn main() -> Result<()> {
             }
         }
 
-        let handler: Arc<dyn mesh_sdk::RequestHandler> = Arc::new(StreamingHandler);
-        let _server = mesh_sdk::MeshAgent::connect(server_kp, &relay_ws_url, server_acl, handler)
-            .await
-            .map_err(|e| anyhow::anyhow!("server connect: {e}"))?;
+        let handler: Arc<dyn agent_mesh_sdk::RequestHandler> = Arc::new(StreamingHandler);
+        let _server =
+            agent_mesh_sdk::MeshAgent::connect(server_kp, &relay_ws_url, server_acl, handler)
+                .await
+                .map_err(|e| anyhow::anyhow!("server connect: {e}"))?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let client_mc = mesh_sdk::MeshClient::connect(client_kp, &relay_ws_url)
+        let client_mc = agent_mesh_sdk::MeshClient::connect(client_kp, &relay_ws_url)
             .await
             .map_err(|e| anyhow::anyhow!("client connect: {e}"))?;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -546,18 +547,19 @@ async fn main() -> Result<()> {
             allowed_capabilities: vec!["ping".into()],
         });
 
-        let handler: Arc<dyn mesh_sdk::RequestHandler> = Arc::new(
-            |_from: mesh_proto::identity::AgentId, _payload: serde_json::Value| async move {
+        let handler: Arc<dyn agent_mesh_sdk::RequestHandler> = Arc::new(
+            |_from: agent_mesh_core::identity::AgentId, _payload: serde_json::Value| async move {
                 serde_json::json!({"pong": true})
             },
         );
 
-        let _server = mesh_sdk::MeshAgent::connect(server_kp, &relay_ws_url, server_acl, handler)
-            .await
-            .map_err(|e| anyhow::anyhow!("server connect: {e}"))?;
+        let _server =
+            agent_mesh_sdk::MeshAgent::connect(server_kp, &relay_ws_url, server_acl, handler)
+                .await
+                .map_err(|e| anyhow::anyhow!("server connect: {e}"))?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let client_mc = mesh_sdk::MeshClient::connect(client_kp, &relay_ws_url)
+        let client_mc = agent_mesh_sdk::MeshClient::connect(client_kp, &relay_ws_url)
             .await
             .map_err(|e| anyhow::anyhow!("client connect: {e}"))?;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -633,12 +635,12 @@ async fn main() -> Result<()> {
         }
 
         #[async_trait::async_trait]
-        impl mesh_sdk::RequestHandler for SlowHandler {
+        impl agent_mesh_sdk::RequestHandler for SlowHandler {
             async fn handle(
                 &self,
-                _from: &mesh_proto::identity::AgentId,
+                _from: &agent_mesh_core::identity::AgentId,
                 _payload: &serde_json::Value,
-                mut cancel: mesh_sdk::CancelToken,
+                mut cancel: agent_mesh_sdk::CancelToken,
             ) -> serde_json::Value {
                 // Wait for cancellation or 10 seconds.
                 tokio::select! {
@@ -653,15 +655,16 @@ async fn main() -> Result<()> {
             }
         }
 
-        let handler: Arc<dyn mesh_sdk::RequestHandler> = Arc::new(SlowHandler {
+        let handler: Arc<dyn agent_mesh_sdk::RequestHandler> = Arc::new(SlowHandler {
             was_cancelled: was_cancelled_clone,
         });
-        let _server = mesh_sdk::MeshAgent::connect(server_kp, &relay_ws_url, server_acl, handler)
-            .await
-            .map_err(|e| anyhow::anyhow!("server connect: {e}"))?;
+        let _server =
+            agent_mesh_sdk::MeshAgent::connect(server_kp, &relay_ws_url, server_acl, handler)
+                .await
+                .map_err(|e| anyhow::anyhow!("server connect: {e}"))?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let client_mc = mesh_sdk::MeshClient::connect(client_kp, &relay_ws_url)
+        let client_mc = agent_mesh_sdk::MeshClient::connect(client_kp, &relay_ws_url)
             .await
             .map_err(|e| anyhow::anyhow!("client connect: {e}"))?;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -724,19 +727,19 @@ async fn main() -> Result<()> {
             allowed_capabilities: vec!["test".into()],
         });
 
-        let handler: Arc<dyn mesh_sdk::RequestHandler> = Arc::new(
-            |_from: mesh_proto::identity::AgentId, _payload: serde_json::Value| async move {
+        let handler: Arc<dyn agent_mesh_sdk::RequestHandler> = Arc::new(
+            |_from: agent_mesh_core::identity::AgentId, _payload: serde_json::Value| async move {
                 serde_json::json!({"ok": true})
             },
         );
 
         let _receiver_agent =
-            mesh_sdk::MeshAgent::connect(receiver_kp, &rate_ws_url, receiver_acl, handler)
+            agent_mesh_sdk::MeshAgent::connect(receiver_kp, &rate_ws_url, receiver_acl, handler)
                 .await
                 .map_err(|e| anyhow::anyhow!("receiver connect: {e}"))?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let sender_mc = mesh_sdk::MeshClient::connect(sender_kp, &rate_ws_url)
+        let sender_mc = agent_mesh_sdk::MeshClient::connect(sender_kp, &rate_ws_url)
             .await
             .map_err(|e| anyhow::anyhow!("sender connect: {e}"))?;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -843,7 +846,7 @@ async fn start_registry() -> Result<SocketAddr> {
     use std::sync::Arc;
 
     let store = Arc::new(tokio::sync::Mutex::new(Vec::<
-        mesh_proto::agent_card::AgentCard,
+        agent_mesh_core::agent_card::AgentCard,
     >::new()));
     let store2 = Arc::clone(&store);
 
@@ -856,7 +859,7 @@ async fn start_registry() -> Result<SocketAddr> {
                     let store = Arc::clone(&store);
                     async move {
                         let now = chrono::Utc::now();
-                        let card = mesh_proto::agent_card::AgentCard {
+                        let card = agent_mesh_core::agent_card::AgentCard {
                             id: uuid::Uuid::new_v4(),
                             agent_id: reg.agent_id,
                             name: reg.name,
@@ -876,7 +879,7 @@ async fn start_registry() -> Result<SocketAddr> {
         .route(
             "/agents",
             get({
-                move |Query(q): Query<mesh_proto::agent_card::AgentCardQuery>| {
+                move |Query(q): Query<agent_mesh_core::agent_card::AgentCardQuery>| {
                     let store = Arc::clone(&store2);
                     async move {
                         let cards = store.lock().await;
@@ -934,11 +937,11 @@ async fn run_meshd(
     secret: &[u8; 32],
     relay_url: &str,
     local_url: &str,
-    alice_id: &mesh_proto::identity::AgentId,
-    bob_id: &mesh_proto::identity::AgentId,
+    alice_id: &agent_mesh_core::identity::AgentId,
+    bob_id: &agent_mesh_core::identity::AgentId,
 ) -> Result<()> {
+    use agent_mesh_core::message::{AuthChallenge, AuthHello, AuthResponse, AuthResult};
     use futures_util::{SinkExt, StreamExt};
-    use mesh_proto::message::{AuthChallenge, AuthHello, AuthResponse, AuthResult};
     use tokio_tungstenite::tungstenite::Message;
 
     let keypair = AgentKeypair::from_bytes(secret);
@@ -1341,7 +1344,9 @@ impl InProcessHub {
 
 async fn in_process_relay_handle(socket: WebSocket, hub: Arc<InProcessHub>) {
     let (mut sink, mut stream) = socket.split();
-    use mesh_proto::message::{AuthChallenge, AuthHello, AuthResponse, AuthResult, AuthResume};
+    use agent_mesh_core::message::{
+        AuthChallenge, AuthHello, AuthResponse, AuthResult, AuthResume,
+    };
 
     // Read first message: either AuthHello or AuthResume.
     let first_text = match stream.next().await {

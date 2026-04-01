@@ -1,6 +1,6 @@
+use agent_mesh_core::acl::AclPolicy;
+use agent_mesh_core::identity::AgentKeypair;
 use anyhow::{Context, Result};
-use mesh_proto::acl::AclPolicy;
-use mesh_proto::identity::AgentKeypair;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for a mesh node daemon.

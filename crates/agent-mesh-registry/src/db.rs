@@ -1,6 +1,6 @@
+use agent_mesh_core::agent_card::{AgentCard, AgentCardQuery, AgentCardRegistration};
+use agent_mesh_core::identity::AgentId;
 use anyhow::Result;
-use mesh_proto::agent_card::{AgentCard, AgentCardQuery, AgentCardRegistration};
-use mesh_proto::identity::AgentId;
 use rusqlite::{params, Connection};
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -214,8 +214,8 @@ fn row_to_card(row: &rusqlite::Row) -> Result<AgentCard> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mesh_proto::agent_card::{AgentCardQuery, AgentCardRegistration, Capability};
-    use mesh_proto::identity::AgentId;
+    use agent_mesh_core::agent_card::{AgentCardQuery, AgentCardRegistration, Capability};
+    use agent_mesh_core::identity::AgentId;
 
     fn test_db() -> Database {
         Database::open(":memory:").expect("in-memory db")

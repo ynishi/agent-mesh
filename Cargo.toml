@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "mesh-proto",
-    "relay",
-    "registry",
-    "meshd",
-    "mesh-sdk",
-    "meshctl",
+    "crates/agent-mesh-core",
+    "crates/agent-mesh-sdk",
+    "crates/agent-mesh-relay",
+    "crates/agent-mesh-registry",
+    "crates/agent-meshd",
+    "crates/agent-meshctl",
     "examples",
 ]
 
@@ -18,8 +18,8 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/ynishi/agent-mesh"
 
 [workspace.dependencies]
-mesh-proto = { path = "mesh-proto" }
-mesh-sdk = { path = "mesh-sdk" }
+agent-mesh-core = { path = "crates/agent-mesh-core" }
+agent-mesh-sdk = { path = "crates/agent-mesh-sdk" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

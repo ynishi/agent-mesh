@@ -2,6 +2,7 @@ mod config;
 mod hub;
 mod ws;
 
+use agent_mesh_core::message::KeyRevocation;
 use anyhow::Result;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -9,7 +10,6 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
-use mesh_proto::message::KeyRevocation;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;

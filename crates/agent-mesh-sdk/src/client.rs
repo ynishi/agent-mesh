@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_mesh_core::identity::{AgentId, AgentKeypair};
+use agent_mesh_core::message::{MeshEnvelope, MessageType};
+use agent_mesh_core::noise::NoiseKeypair;
 use futures_util::stream::StreamExt;
-use mesh_proto::identity::{AgentId, AgentKeypair};
-use mesh_proto::message::{MeshEnvelope, MessageType};
-use mesh_proto::noise::NoiseKeypair;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 

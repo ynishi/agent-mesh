@@ -4,10 +4,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use agent_mesh_core::identity::AgentId;
+use agent_mesh_core::message::{KeyRevocation, MeshEnvelope};
 use futures_util::stream::SplitSink;
 use futures_util::SinkExt;
-use mesh_proto::identity::AgentId;
-use mesh_proto::message::{KeyRevocation, MeshEnvelope};
 use rusqlite::Connection;
 use tokio::sync::{Mutex, RwLock};
 

@@ -1,15 +1,15 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use agent_mesh_core::identity::AgentId;
+use agent_mesh_core::message::{
+    AuthChallenge, AuthHello, AuthResponse, AuthResult, AuthResume, MeshEnvelope,
+};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use futures_util::SinkExt;
-use mesh_proto::identity::AgentId;
-use mesh_proto::message::{
-    AuthChallenge, AuthHello, AuthResponse, AuthResult, AuthResume, MeshEnvelope,
-};
 
 use crate::hub::Hub;
 

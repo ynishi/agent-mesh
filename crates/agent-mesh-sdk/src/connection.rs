@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::stream::StreamExt;
-use futures_util::SinkExt;
-use mesh_proto::identity::{AgentId, AgentKeypair};
-use mesh_proto::message::{
+use agent_mesh_core::identity::{AgentId, AgentKeypair};
+use agent_mesh_core::message::{
     AuthChallenge, AuthHello, AuthResponse, AuthResult, AuthResume, MeshEnvelope, MessageType,
 };
-use mesh_proto::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
+use agent_mesh_core::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
+use futures_util::stream::StreamExt;
+use futures_util::SinkExt;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;

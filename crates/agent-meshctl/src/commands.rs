@@ -1,7 +1,7 @@
+use agent_mesh_core::acl::AclRule;
+use agent_mesh_core::agent_card::{AgentCardRegistration, Capability};
+use agent_mesh_core::identity::{AgentId, AgentKeypair};
 use anyhow::{Context, Result};
-use mesh_proto::acl::AclRule;
-use mesh_proto::agent_card::{AgentCardRegistration, Capability};
-use mesh_proto::identity::{AgentId, AgentKeypair};
 use std::time::Duration;
 
 fn resolve_secret_key(provided: Option<&str>) -> Result<AgentKeypair> {
@@ -121,7 +121,7 @@ pub async fn request(
         obj.insert("capability".into(), serde_json::json!(capability));
     }
 
-    let client = mesh_sdk::MeshClient::connect(kp, relay_url)
+    let client = agent_mesh_sdk::MeshClient::connect(kp, relay_url)
         .await
         .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
 
@@ -179,7 +179,8 @@ pub async fn revoke(relay_url: &str, reason: Option<&str>, secret_key: Option<&s
     let kp = resolve_secret_key(secret_key)?;
     let agent_id = kp.agent_id();
 
-    let revocation = mesh_proto::message::KeyRevocation::new(&kp, reason.map(|s| s.to_string()));
+    let revocation =
+        agent_mesh_core::message::KeyRevocation::new(&kp, reason.map(|s| s.to_string()));
 
     let client = reqwest::Client::new();
     let resp = client

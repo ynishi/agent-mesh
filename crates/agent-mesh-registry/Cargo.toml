@@ -1,32 +1,27 @@
 [package]
-name = "relay"
+name = "agent-mesh-registry"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "WebSocket relay server for agent-mesh"
+description = "Agent Card registry with capability search for agent-mesh"
 
 [[bin]]
-name = "relay"
+name = "agent-mesh-registry"
 path = "src/main.rs"
 
 [dependencies]
-mesh-proto = { workspace = true }
+agent-mesh-core = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
-futures-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+rusqlite = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-uuid = { workspace = true }
-rand = { workspace = true }
-base64 = { workspace = true }
-ed25519-dalek = { workspace = true }
-clap = { workspace = true }
-toml = { workspace = true }
-rusqlite = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }

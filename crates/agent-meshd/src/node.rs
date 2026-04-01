@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use agent_mesh_core::identity::AgentKeypair;
+use agent_mesh_core::message::{
+    AuthChallenge, AuthHello, AuthResponse, AuthResult, MeshEnvelope, MessageType,
+};
+use agent_mesh_core::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
 use anyhow::Result;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use futures_util::SinkExt;
-use mesh_proto::identity::AgentKeypair;
-use mesh_proto::message::{
-    AuthChallenge, AuthHello, AuthResponse, AuthResult, MeshEnvelope, MessageType,
-};
-use mesh_proto::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
 use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -31,7 +31,7 @@ pub struct MeshNode {
     noise_keypair: NoiseKeypair,
     relay_url: String,
     local_agent_url: String,
-    acl: Arc<RwLock<mesh_proto::acl::AclPolicy>>,
+    acl: Arc<RwLock<agent_mesh_core::acl::AclPolicy>>,
     config_path: Option<String>,
 }
 
@@ -351,7 +351,7 @@ impl MeshNode {
         sink: &mut SplitSink<WsStream, Message>,
         sessions: &mut HashMap<String, PeerNoise>,
         peer_key: &str,
-        to: mesh_proto::identity::AgentId,
+        to: agent_mesh_core::identity::AgentId,
         msg_type: MessageType,
         in_reply_to: Option<uuid::Uuid>,
         payload: serde_json::Value,

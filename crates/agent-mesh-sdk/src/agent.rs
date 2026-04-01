@@ -3,12 +3,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_mesh_core::acl::AclPolicy;
+use agent_mesh_core::identity::{AgentId, AgentKeypair};
+use agent_mesh_core::message::{MeshEnvelope, MessageType};
+use agent_mesh_core::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
 use futures_util::stream::StreamExt;
 use futures_util::SinkExt;
-use mesh_proto::acl::AclPolicy;
-use mesh_proto::identity::{AgentId, AgentKeypair};
-use mesh_proto::message::{MeshEnvelope, MessageType};
-use mesh_proto::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
 use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
