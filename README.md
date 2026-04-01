@@ -23,13 +23,14 @@ agent-mesh provides **reachability**, **authentication**, and **capability disco
 
 ```
 agent-mesh/
-  mesh-proto/    Protocol types (Agent Card, ACL, messages, Noise handshake)
-  relay/         WebSocket relay server (routes by agent ID)
-  meshd/         Local daemon — maintains relay connection, proxies to local agents
-  mesh-sdk/      Client library — daemonless connectivity for edge/embedded
-  registry/      Agent Card CRUD + capability search (SQLite-backed)
-  meshctl/       CLI
-  examples/      E2E demo (all components in-process)
+  crates/
+    agent-mesh-core/      Protocol types (Agent Card, ACL, messages, Noise handshake)
+    agent-mesh-relay/     WebSocket relay server (routes by agent ID)
+    agent-meshd/          Local daemon — maintains relay connection, proxies to local agents
+    agent-mesh-sdk/       Client library — daemonless connectivity for edge/embedded
+    agent-mesh-registry/  Agent Card CRUD + capability search (SQLite-backed)
+    agent-meshctl/        CLI
+  examples/               E2E demo (all components in-process)
 ```
 
 ## Features
@@ -65,49 +66,63 @@ agent-mesh/
 ## Quick start
 
 ```bash
-# Build everything
 cargo build --release
-
-# 1. Generate a keypair
-meshctl keygen
-# => agent_id: <BASE64URL_PUBKEY>
-# => secret_key: <HEX>
-
-# 2. Start the relay
-relay --listen 0.0.0.0:9800
-
-# 3. Start the registry
-registry --listen 0.0.0.0:9801
-
-# 4. Register your agent
-meshctl register \
-  --name "my-agent" \
-  --capabilities "scheduling,availability" \
-  --secret-key <HEX>
-
-# 5. Start meshd (connects your local agent to the mesh)
-meshd \
-  --relay ws://localhost:9800/ws \
-  --local-agent http://localhost:8080 \
-  --secret-key <HEX>
-
-# 6. Discover agents
-meshctl discover --capability scheduling
-
-# 7. Send a request
-meshctl request \
-  --target <AGENT_ID> \
-  --capability scheduling \
-  --payload '{"date": "2026-04-01"}'
 ```
 
 ### E2E demo (all-in-one)
 
 ```bash
-cargo run -p examples --bin e2e-demo
+cargo run --release -p examples --bin e2e-demo
 ```
 
-Starts relay, registry, mock agent, and meshd in a single process — runs 13 tests covering the full Alice -> Relay -> Bob flow with Noise E2E encryption, streaming, ACL, key revocation, rate limiting, and connection resumption.
+Starts relay, registry, mock agent, and meshd in a single process — covers the full Alice → Relay → Bob flow with Noise E2E encryption, streaming, ACL, key revocation, rate limiting, and connection resumption.
+
+### Connect your own agent
+
+Requires 4 terminals: relay, registry, meshd, and a control terminal.
+
+```bash
+# --- Terminal 1: Relay ---
+agent-mesh-relay
+
+# --- Terminal 2: Registry ---
+agent-mesh-registry
+
+# --- Control terminal ---
+
+# Generate keypairs
+agent-meshctl keygen
+# Agent ID:    <BOB_ID>
+# Secret Key:  <BOB_KEY>
+
+agent-meshctl keygen
+# Agent ID:    <ALICE_ID>
+# Secret Key:  <ALICE_KEY>
+
+# Register Bob
+agent-meshctl register \
+  --name "bob" \
+  --capabilities "scheduling,availability" \
+  --secret-key <BOB_KEY>
+
+# --- Terminal 3: meshd (Bob's node) ---
+agent-meshd \
+  --relay ws://localhost:9800/ws \
+  --local-agent http://localhost:8080 \
+  --secret-key <BOB_KEY>
+
+# --- Back to control terminal ---
+
+# Discover agents and send a request as Alice
+agent-meshctl discover --capability scheduling
+agent-meshctl request \
+  --target <BOB_ID> \
+  --capability scheduling \
+  --payload '{"action": "list"}' \
+  --secret-key <ALICE_KEY>
+```
+
+Run `--help` on each binary for full options. `agent-meshd` also supports `--config meshd.json` for file-based configuration including ACL policies.
 
 ## Security model
 
@@ -139,12 +154,12 @@ Starts relay, registry, mock agent, and meshd in a single process — runs 13 te
 
 | Crate | Description |
 |---|---|
-| `mesh-proto` | Shared types — `AgentId`, `AgentCard`, `AclPolicy`, `MeshEnvelope`, Noise handshake |
-| `relay` | WebSocket hub with routing, heartbeat, dead-agent detection, offline buffering, rate limiting, SQLite persistence, graceful shutdown |
-| `meshd` | Local daemon — relay connection, ACL enforcement, HTTP proxy to local agent |
-| `mesh-sdk` | `MeshClient` + `MeshAgent` — E2E encrypted requests, streaming, cancellation |
-| `registry` | REST API for Agent Card CRUD, capability search, liveness enrichment |
-| `meshctl` | CLI — `keygen`, `register`, `discover`, `request`, `status`, `revoke`, `acl` |
+| `agent-mesh-core` | Shared types — `AgentId`, `AgentCard`, `AclPolicy`, `MeshEnvelope`, Noise handshake |
+| `agent-mesh-relay` | WebSocket hub with routing, heartbeat, dead-agent detection, offline buffering, rate limiting, SQLite persistence, graceful shutdown |
+| `agent-meshd` | Local daemon — relay connection, ACL enforcement, HTTP proxy to local agent |
+| `agent-mesh-sdk` | `MeshClient` + `MeshAgent` — E2E encrypted requests, streaming, cancellation |
+| `agent-mesh-registry` | REST API for Agent Card CRUD, capability search, liveness enrichment |
+| `agent-meshctl` | CLI — `keygen`, `register`, `discover`, `request`, `status`, `revoke`, `acl` |
 
 ## License
 
