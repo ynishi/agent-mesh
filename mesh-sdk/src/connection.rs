@@ -488,6 +488,74 @@ pub(crate) async fn receive_ws_json<T: serde::de::DeserializeOwned>(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stream_receiver_receives_chunks() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        let mut receiver = StreamReceiver::new(rx, cancel_tx);
+
+        tx.send(Ok(serde_json::json!({"chunk": 1}))).unwrap();
+        tx.send(Ok(serde_json::json!({"chunk": 2}))).unwrap();
+        drop(tx); // Close channel
+
+        let chunk1 = receiver.next().await.unwrap().unwrap();
+        assert_eq!(chunk1, serde_json::json!({"chunk": 1}));
+
+        let chunk2 = receiver.next().await.unwrap().unwrap();
+        assert_eq!(chunk2, serde_json::json!({"chunk": 2}));
+
+        // Channel closed
+        assert!(receiver.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_receiver_collect() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        let receiver = StreamReceiver::new(rx, cancel_tx);
+
+        tx.send(Ok(serde_json::json!("a"))).unwrap();
+        tx.send(Ok(serde_json::json!("b"))).unwrap();
+        tx.send(Ok(serde_json::json!("c"))).unwrap();
+        drop(tx);
+
+        let chunks = receiver.collect().await.unwrap();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0], serde_json::json!("a"));
+    }
+
+    #[tokio::test]
+    async fn stream_receiver_collect_propagates_error() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        let receiver = StreamReceiver::new(rx, cancel_tx);
+
+        tx.send(Ok(serde_json::json!("ok"))).unwrap();
+        tx.send(Err(SdkError::Remote("test error".into()))).unwrap();
+        drop(tx);
+
+        let result = receiver.collect().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn stream_receiver_cancel_sends_signal() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let receiver = StreamReceiver::new(rx, cancel_tx);
+
+        drop(tx);
+        receiver.cancel();
+
+        // cancel_rx should have received the signal
+        assert!(cancel_rx.await.is_ok());
+    }
+}
+
 /// Decrypt an envelope's payload using the Noise session for the sender.
 pub(crate) async fn decrypt_envelope_payload(
     envelope: &MeshEnvelope,

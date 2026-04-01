@@ -58,8 +58,12 @@ impl MeshNode {
         };
         let acl = Arc::clone(&self.acl);
         tokio::spawn(async move {
-            let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-                .expect("failed to register SIGHUP handler");
+            let Ok(mut sighup) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            else {
+                tracing::warn!("failed to register SIGHUP handler");
+                return;
+            };
             loop {
                 sighup.recv().await;
                 tracing::info!("SIGHUP received, reloading ACL from {path}");
@@ -291,10 +295,9 @@ impl MeshNode {
                 }
 
                 // Take ownership to transition state.
-                let peer_state = sessions.remove(peer_key).unwrap();
-                let handshake = match peer_state {
-                    PeerNoise::Handshaking(h) => *h,
-                    _ => unreachable!(),
+                let handshake = match sessions.remove(peer_key) {
+                    Some(PeerNoise::Handshaking(h)) => *h,
+                    _ => return Err(anyhow::anyhow!("unexpected peer state after msg3")),
                 };
                 let transport = handshake
                     .into_transport()

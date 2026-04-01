@@ -466,6 +466,17 @@ impl Hub {
         }
     }
 
+    /// Check rate limit for a given agent. Returns true if allowed.
+    /// Exposed for testing.
+    #[cfg(test)]
+    async fn check_rate_limit(&self, agent_id: &str) -> bool {
+        let mut limiters = self.rate_limiters.lock().await;
+        let bucket = limiters
+            .entry(agent_id.to_string())
+            .or_insert_with(|| TokenBucket::new(self.rate_limit, self.rate_burst));
+        bucket.try_consume()
+    }
+
     /// Background reaper: sends Ping to idle agents, removes dead ones.
     async fn reap_dead_agents(&self) {
         let now = Instant::now();
@@ -514,5 +525,99 @@ impl Hub {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_bucket_allows_burst() {
+        let mut bucket = TokenBucket::new(10.0, 5.0);
+        for _ in 0..5 {
+            assert!(bucket.try_consume());
+        }
+        // 6th should fail (burst exhausted)
+        assert!(!bucket.try_consume());
+    }
+
+    #[test]
+    fn token_bucket_refills_over_time() {
+        let mut bucket = TokenBucket::new(100.0, 5.0);
+        // Exhaust burst
+        for _ in 0..5 {
+            bucket.try_consume();
+        }
+        assert!(!bucket.try_consume());
+
+        // Simulate time passing by backdating last_refill
+        bucket.last_refill = Instant::now() - Duration::from_millis(100);
+        // 100ms at 100 tokens/sec = 10 tokens refilled (capped at burst=5)
+        assert!(bucket.try_consume());
+    }
+
+    #[tokio::test]
+    async fn session_token_issue_and_validate() {
+        let hub = Hub::with_rate_limit(10.0, 5.0);
+        let token = hub.issue_session_token("agent-1").await;
+
+        let result = hub.validate_session_token(&token).await;
+        assert_eq!(result, Some("agent-1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn session_token_invalid() {
+        let hub = Hub::with_rate_limit(10.0, 5.0);
+        let result = hub.validate_session_token("bogus-token").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn revocation_blocks_agent() {
+        let hub = Hub::with_rate_limit(10.0, 5.0);
+        let agent_id = AgentId::from_raw("revoked-agent".to_string());
+
+        assert!(!hub.is_revoked(&agent_id).await);
+
+        // Manually insert into revoked set (bypassing signature verification)
+        hub.revoked
+            .write()
+            .await
+            .insert("revoked-agent".to_string());
+
+        assert!(hub.is_revoked(&agent_id).await);
+        assert_eq!(hub.revoked_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn connected_count_starts_at_zero() {
+        let hub = Hub::with_rate_limit(10.0, 5.0);
+        assert_eq!(hub.connected_count().await, 0);
+        assert_eq!(hub.buffered_agent_count().await, 0);
+        assert_eq!(hub.revoked_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_enforced() {
+        let hub = Hub::with_rate_limit(10.0, 3.0); // burst=3
+        for _ in 0..3 {
+            assert!(hub.check_rate_limit("agent-1").await);
+        }
+        assert!(!hub.check_rate_limit("agent-1").await);
+
+        // Different agent has its own bucket
+        assert!(hub.check_rate_limit("agent-2").await);
+    }
+
+    #[tokio::test]
+    async fn metrics_start_at_zero() {
+        let hub = Hub::with_rate_limit(10.0, 5.0);
+        assert_eq!(hub.messages_routed.load(Ordering::Relaxed), 0);
+        assert_eq!(hub.messages_buffered.load(Ordering::Relaxed), 0);
+        assert_eq!(hub.messages_dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(hub.messages_rate_limited.load(Ordering::Relaxed), 0);
+        assert_eq!(hub.auth_successes.load(Ordering::Relaxed), 0);
+        assert_eq!(hub.auth_failures.load(Ordering::Relaxed), 0);
     }
 }

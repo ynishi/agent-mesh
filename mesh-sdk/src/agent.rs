@@ -549,10 +549,9 @@ async fn handle_handshake(
             if handshake.read_message(hs_data).is_err() {
                 return;
             }
-            let state = handshake_states.remove(peer_key).unwrap();
-            let hs = match state {
-                PeerNoise::Handshaking(h) => *h,
-                _ => unreachable!(),
+            let hs = match handshake_states.remove(peer_key) {
+                Some(PeerNoise::Handshaking(h)) => *h,
+                _ => return,
             };
             match hs.into_transport() {
                 Ok(t) => {
@@ -591,12 +590,73 @@ async fn handle_handshake(
                 serde_json::Value::String(hs_reply),
             );
             if let Ok(reply) = reply {
-                let json = serde_json::to_string(&reply).unwrap();
-                let mut s = sink.lock().await;
-                let _ = s.send(Message::text(json)).await;
+                if let Ok(json) = serde_json::to_string(&reply) {
+                    let mut s = sink.lock().await;
+                    let _ = s.send(Message::text(json)).await;
+                }
             }
             handshake_states.insert(peer_key.to_string(), PeerNoise::Handshaking(Box::new(hs)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_token_initially_not_cancelled() {
+        let (_notifier, token) = CancelToken::new();
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn cancel_token_becomes_cancelled() {
+        let (notifier, token) = CancelToken::new();
+        notifier.cancel();
+        assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancel_token_cancelled_future_completes() {
+        let (notifier, mut token) = CancelToken::new();
+        notifier.cancel();
+        // Should complete immediately since already cancelled
+        token.cancelled().await;
+        assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancel_token_cancelled_future_waits() {
+        let (notifier, mut token) = CancelToken::new();
+
+        let handle = tokio::spawn(async move {
+            token.cancelled().await;
+            assert!(token.is_cancelled());
+        });
+
+        // Cancel after a brief delay
+        tokio::task::yield_now().await;
+        notifier.cancel();
+        handle.await.unwrap();
+    }
+
+    #[test]
+    fn cancel_notifier_drop_does_not_cancel() {
+        let (notifier, token) = CancelToken::new();
+        drop(notifier);
+        // Dropping the notifier without calling cancel() should NOT cancel.
+        // The watch channel sender is dropped, but the value remains false.
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn cancel_token_clone() {
+        let (notifier, token) = CancelToken::new();
+        let token2 = token.clone();
+        notifier.cancel();
+        assert!(token.is_cancelled());
+        assert!(token2.is_cancelled());
     }
 }
 
