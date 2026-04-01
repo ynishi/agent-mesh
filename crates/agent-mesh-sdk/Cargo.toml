@@ -6,6 +6,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Client/agent SDK for agent-mesh with E2E encryption"
+keywords = ["agent", "mesh", "sdk", "encryption", "websocket"]
+categories = ["network-programming", "api-bindings"]
 
 [dependencies]
 agent-mesh-core = { workspace = true }

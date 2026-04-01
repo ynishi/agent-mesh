@@ -6,6 +6,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Core types for agent-mesh: identity, messages, ACL, Noise handshake"
+keywords = ["agent", "mesh", "encryption", "noise", "identity"]
+categories = ["network-programming", "cryptography"]
 
 [dependencies]
 serde = { workspace = true }

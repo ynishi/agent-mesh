@@ -6,6 +6,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Local daemon for agent-mesh relay connectivity"
+keywords = ["agent", "mesh", "daemon", "proxy", "sidecar"]
+categories = ["network-programming"]
 
 [[bin]]
 name = "agent-meshd"
@@ -27,3 +29,6 @@ uuid = { workspace = true }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 hex = "0.4"
+
+[dev-dependencies]
+axum = { workspace = true }

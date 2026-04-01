@@ -6,6 +6,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Agent Card registry with capability search for agent-mesh"
+keywords = ["agent", "mesh", "registry", "discovery", "capability"]
+categories = ["network-programming"]
 
 [[bin]]
 name = "agent-mesh-registry"
@@ -26,3 +28,7 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true }

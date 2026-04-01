@@ -6,6 +6,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "WebSocket relay server for agent-mesh"
+keywords = ["agent", "mesh", "relay", "websocket", "server"]
+categories = ["network-programming"]
 
 [[bin]]
 name = "agent-mesh-relay"
@@ -34,6 +36,7 @@ chrono = { workspace = true }
 [dev-dependencies]
 agent-mesh-sdk = { workspace = true }
 async-trait = { workspace = true }
+futures-util = { workspace = true }
 insta = { version = "1", features = ["json", "redactions"] }
 reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
