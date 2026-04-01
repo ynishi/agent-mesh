@@ -4,7 +4,7 @@ use agent_mesh_core::identity::{AgentId, AgentKeypair};
 use anyhow::{Context, Result};
 use std::time::Duration;
 
-fn resolve_secret_key(provided: Option<&str>) -> Result<AgentKeypair> {
+pub fn resolve_secret_key(provided: Option<&str>) -> Result<AgentKeypair> {
     let hex_str = match provided {
         Some(s) => s.to_string(),
         None => std::env::var("MESH_SECRET_KEY")
@@ -210,4 +210,127 @@ pub fn acl(source_id: &str, target_id: &str, allow_csv: &str) -> Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&rule)?);
     Ok(())
+}
+
+/// Build an ACL rule value (testable version without stdout).
+pub fn build_acl_rule(source_id: &str, target_id: &str, allow_csv: &str) -> AclRule {
+    AclRule {
+        source: AgentId::from_raw(source_id.to_string()),
+        target: AgentId::from_raw(target_id.to_string()),
+        allowed_capabilities: allow_csv.split(',').map(|s| s.trim().to_string()).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_secret_hex() -> String {
+        let kp = AgentKeypair::generate();
+        hex::encode(kp.secret_bytes())
+    }
+
+    #[test]
+    fn resolve_secret_key_from_arg() {
+        let hex = valid_secret_hex();
+        let kp = resolve_secret_key(Some(&hex)).unwrap();
+        assert!(!kp.agent_id().as_str().is_empty());
+    }
+
+    #[test]
+    fn resolve_secret_key_invalid_hex() {
+        let result = resolve_secret_key(Some("not-hex"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_secret_key_wrong_length() {
+        let result = resolve_secret_key(Some("abcd"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_secret_key_no_arg_no_env() {
+        // Unset env to ensure test isolation.
+        std::env::remove_var("MESH_SECRET_KEY");
+        let result = resolve_secret_key(None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn keygen_succeeds() {
+        // keygen() prints to stdout and always succeeds.
+        keygen().unwrap();
+    }
+
+    #[test]
+    fn build_acl_rule_single_capability() {
+        let rule = build_acl_rule("alice-id", "bob-id", "scheduling");
+        assert_eq!(rule.source.as_str(), "alice-id");
+        assert_eq!(rule.target.as_str(), "bob-id");
+        assert_eq!(rule.allowed_capabilities, vec!["scheduling"]);
+    }
+
+    #[test]
+    fn build_acl_rule_multiple_capabilities() {
+        let rule = build_acl_rule("alice", "bob", "scheduling, availability, contact");
+        assert_eq!(rule.allowed_capabilities.len(), 3);
+        assert_eq!(rule.allowed_capabilities[0], "scheduling");
+        assert_eq!(rule.allowed_capabilities[1], "availability");
+        assert_eq!(rule.allowed_capabilities[2], "contact");
+    }
+
+    #[test]
+    fn acl_json_roundtrip() {
+        let rule = build_acl_rule("src", "tgt", "cap1,cap2");
+        let json = serde_json::to_string(&rule).unwrap();
+        let parsed: AclRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.source.as_str(), "src");
+        assert_eq!(parsed.target.as_str(), "tgt");
+        assert_eq!(parsed.allowed_capabilities, vec!["cap1", "cap2"]);
+    }
+
+    #[tokio::test]
+    async fn discover_against_real_registry() {
+        use std::future::IntoFuture;
+        use std::sync::Arc;
+
+        let db = Arc::new(agent_mesh_registry::db::Database::open(":memory:").unwrap());
+        let state = agent_mesh_registry::AppState {
+            db,
+            relay_url: None,
+        };
+        let app = agent_mesh_registry::app(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+
+        let registry_url = format!("http://127.0.0.1:{}", addr.port());
+
+        // Register an agent first.
+        let secret = valid_secret_hex();
+        register(&registry_url, "TestAgent", None, "test-cap", Some(&secret))
+            .await
+            .unwrap();
+
+        // Discover by capability.
+        discover(&registry_url, Some("test-cap"), None)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_against_real_relay() {
+        use std::future::IntoFuture;
+        use std::sync::Arc;
+
+        let hub = Arc::new(agent_mesh_relay::hub::Hub::with_rate_limit(100.0, 200.0));
+        let app = agent_mesh_relay::app(hub);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+
+        let relay_url = format!("http://127.0.0.1:{}", addr.port());
+        status(&relay_url).await.unwrap();
+    }
 }

@@ -18,3 +18,51 @@ pub async fn forward_to_local(local_url: &str, payload: &Value) -> Result<Value>
 
     Ok(body)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::IntoFuture;
+
+    async fn mock_server(handler: axum::routing::MethodRouter) -> String {
+        let app = axum::Router::new().route("/", handler);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    #[tokio::test]
+    async fn forward_json_response() {
+        let url = mock_server(axum::routing::post(
+            |axum::Json(body): axum::Json<Value>| async move {
+                axum::Json(serde_json::json!({
+                    "echo": body,
+                    "status": "ok",
+                }))
+            },
+        ))
+        .await;
+
+        let payload = serde_json::json!({"capability": "scheduling"});
+        let result = forward_to_local(&url, &payload).await.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["echo"]["capability"], "scheduling");
+    }
+
+    #[tokio::test]
+    async fn forward_connection_refused() {
+        let result = forward_to_local("http://127.0.0.1:1", &serde_json::json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn forward_non_json_response() {
+        let url = mock_server(axum::routing::post(|| async { "plain text" })).await;
+
+        let result = forward_to_local(&url, &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result["error"], "non-json response");
+    }
+}

@@ -5,28 +5,25 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "E2E demo for agent-mesh"
+description = "Demos for agent-mesh"
 publish = false
 
 [[bin]]
-name = "e2e-demo"
-path = "src/bin/e2e_demo.rs"
+name = "mesh-demo"
+path = "src/bin/mesh_demo.rs"
 
 [dependencies]
 agent-mesh-core = { workspace = true }
+agent-mesh-relay = { workspace = true }
+agent-mesh-registry = { workspace = true }
 agent-mesh-sdk = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 base64 = { workspace = true }
-ed25519-dalek = { workspace = true }
-async-trait = { workspace = true }

@@ -488,6 +488,25 @@ pub(crate) async fn receive_ws_json<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Decrypt an envelope's payload using the Noise session for the sender.
+pub(crate) async fn decrypt_envelope_payload(
+    envelope: &MeshEnvelope,
+    sessions: &SessionMap,
+) -> Result<serde_json::Value, SdkError> {
+    let ct = envelope
+        .payload
+        .as_str()
+        .ok_or_else(|| SdkError::Protocol("encrypted payload not a string".into()))?;
+    let mut sess = sessions.lock().await;
+    let transport = sess
+        .get_mut(envelope.from.as_str())
+        .ok_or_else(|| SdkError::Protocol("no noise session for decrypt".into()))?;
+    let pt = transport
+        .decrypt(ct)
+        .map_err(|e| SdkError::Protocol(format!("decrypt: {e}")))?;
+    serde_json::from_slice(&pt).map_err(|e| SdkError::Protocol(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,23 +573,4 @@ mod tests {
         // cancel_rx should have received the signal
         assert!(cancel_rx.await.is_ok());
     }
-}
-
-/// Decrypt an envelope's payload using the Noise session for the sender.
-pub(crate) async fn decrypt_envelope_payload(
-    envelope: &MeshEnvelope,
-    sessions: &SessionMap,
-) -> Result<serde_json::Value, SdkError> {
-    let ct = envelope
-        .payload
-        .as_str()
-        .ok_or_else(|| SdkError::Protocol("encrypted payload not a string".into()))?;
-    let mut sess = sessions.lock().await;
-    let transport = sess
-        .get_mut(envelope.from.as_str())
-        .ok_or_else(|| SdkError::Protocol("no noise session for decrypt".into()))?;
-    let pt = transport
-        .decrypt(ct)
-        .map_err(|e| SdkError::Protocol(format!("decrypt: {e}")))?;
-    serde_json::from_slice(&pt).map_err(|e| SdkError::Protocol(e.to_string()))
 }

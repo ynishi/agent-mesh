@@ -30,7 +30,7 @@ agent-mesh/
     agent-mesh-sdk/       Client library — daemonless connectivity for edge/embedded
     agent-mesh-registry/  Agent Card CRUD + capability search (SQLite-backed)
     agent-meshctl/        CLI
-  examples/               E2E demo (all components in-process)
+  examples/               Demo (all components in-process)
 ```
 
 ## Features
@@ -69,13 +69,13 @@ agent-mesh/
 cargo build --release
 ```
 
-### E2E demo (all-in-one)
+### Demo (all-in-one)
 
 ```bash
-cargo run --release -p examples --bin e2e-demo
+cargo run --release -p examples --bin mesh-demo
 ```
 
-Starts relay, registry, mock agent, and meshd in a single process — covers the full Alice → Relay → Bob flow with Noise E2E encryption, streaming, ACL, key revocation, rate limiting, and connection resumption.
+Starts relay, registry, mock agent, and meshd in a single process — runs the full Alice → Relay → Bob flow with agent registration, capability discovery, and Noise E2E encrypted communication.
 
 ### Connect your own agent
 

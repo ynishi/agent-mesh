@@ -1,8 +1,7 @@
+use agent_meshctl::commands;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
-
-mod commands;
 
 #[derive(Parser)]
 #[command(name = "meshctl", about = "Agent mesh control CLI")]

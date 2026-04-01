@@ -2,10 +2,11 @@ use std::future::IntoFuture;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_mesh_core::acl::AclPolicy;
+use agent_mesh_core::acl::{AclPolicy, AclRule};
 use agent_mesh_core::identity::{AgentId, AgentKeypair};
+use agent_mesh_core::message::{KeyRevocation, MeshEnvelope, MessageType};
 use agent_mesh_relay::hub::Hub;
-use agent_mesh_sdk::{CancelToken, MeshAgent, MeshClient, RequestHandler};
+use agent_mesh_sdk::{CancelToken, MeshAgent, MeshClient, RequestHandler, ValueStream};
 use insta::assert_json_snapshot;
 
 /// Start a relay on a random port and return (ws_url, http_base_url).
@@ -210,4 +211,394 @@ async fn multiple_agents_communicate() {
         .await
         .unwrap();
     assert_eq!(resp["echo"]["from_bob"], true);
+}
+
+// --- Session reuse (Noise handshake only on first request) ---
+
+#[tokio::test]
+async fn encrypted_session_reuse() {
+    let (relay_url, _http) = start_relay().await;
+
+    let agent_kp = AgentKeypair::generate();
+    let agent_id = agent_kp.agent_id();
+    let client_kp = AgentKeypair::generate();
+
+    let handler: Arc<dyn RequestHandler> = Arc::new(EchoHandler);
+    let _agent = MeshAgent::connect(agent_kp, &relay_url, allow_all_acl(), handler)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client = MeshClient::connect(client_kp, &relay_url).await.unwrap();
+
+    // First request triggers Noise handshake.
+    let resp1 = client
+        .request(
+            &agent_id,
+            serde_json::json!({"capability": "echo", "seq": 1}),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp1["echo"]["seq"], 1);
+
+    // Second request reuses the session (no new handshake).
+    let resp2 = client
+        .request(
+            &agent_id,
+            serde_json::json!({"capability": "echo", "seq": 2}),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2["echo"]["seq"], 2);
+}
+
+// --- ACL with specific rules via MeshAgent ---
+
+#[tokio::test]
+async fn mesh_agent_acl_with_rules() {
+    let (relay_url, _http) = start_relay().await;
+
+    let server_kp = AgentKeypair::generate();
+    let server_id = server_kp.agent_id();
+    let client_kp = AgentKeypair::generate();
+    let client_id = client_kp.agent_id();
+
+    // Allow only "echo" capability.
+    let mut acl = AclPolicy::new();
+    acl.add_rule(AclRule {
+        source: client_id.clone(),
+        target: server_id.clone(),
+        allowed_capabilities: vec!["echo".into()],
+    });
+
+    let handler: Arc<dyn RequestHandler> = Arc::new(EchoHandler);
+    let _agent = MeshAgent::connect(server_kp, &relay_url, acl, handler)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client = MeshClient::connect(client_kp, &relay_url).await.unwrap();
+
+    // Allowed capability succeeds.
+    let resp = client
+        .request(
+            &server_id,
+            serde_json::json!({"capability": "echo", "data": "ok"}),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp["echo"]["data"], "ok");
+
+    // Denied capability fails.
+    let result = client
+        .request(
+            &server_id,
+            serde_json::json!({"capability": "admin", "action": "delete"}),
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(result.is_err());
+}
+
+// --- Message buffering for offline agent ---
+
+#[tokio::test]
+async fn message_buffering_offline_agent() {
+    let (relay_url, _http) = start_relay().await;
+
+    let agent_kp = AgentKeypair::generate();
+    let agent_id = agent_kp.agent_id();
+    let sender_kp = AgentKeypair::generate();
+
+    // Connect sender first (agent is offline).
+    let sender = MeshClient::connect(sender_kp, &relay_url).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send plaintext request to offline agent (relay will buffer).
+    let agent_id_clone = agent_id.clone();
+    let send_task = tokio::spawn(async move {
+        sender
+            .request_plaintext(
+                &agent_id_clone,
+                serde_json::json!({"capability": "echo", "buffered": true}),
+                Duration::from_secs(10),
+            )
+            .await
+    });
+
+    // Wait for message to be buffered.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Now connect the agent — buffered message should be flushed.
+    let handler: Arc<dyn RequestHandler> = Arc::new(EchoHandler);
+    let _agent = MeshAgent::connect(agent_kp, &relay_url, allow_all_acl(), handler)
+        .await
+        .unwrap();
+
+    let result = send_task.await.unwrap().unwrap();
+    assert_eq!(result["echo"]["buffered"], true);
+}
+
+// --- Tampered envelope signature verification ---
+
+#[tokio::test]
+async fn tampered_envelope_rejected() {
+    let kp = AgentKeypair::generate();
+    let target = AgentKeypair::generate().agent_id();
+
+    let mut envelope = MeshEnvelope::new_signed(
+        &kp,
+        target,
+        MessageType::Request,
+        serde_json::json!({"capability": "scheduling"}),
+    )
+    .unwrap();
+
+    // Tamper the payload after signing.
+    envelope.payload = serde_json::json!({"capability": "admin", "tampered": true});
+    assert!(envelope.verify().is_err());
+}
+
+// --- Key revocation via HTTP endpoint ---
+
+#[tokio::test]
+async fn key_revocation_blocks_agent() {
+    let (relay_url, http) = start_relay().await;
+
+    let victim_kp = AgentKeypair::generate();
+    let victim_id = victim_kp.agent_id();
+    let victim_secret = *victim_kp.secret_bytes();
+    let attacker_kp = AgentKeypair::generate();
+
+    // Connect victim agent.
+    let handler: Arc<dyn RequestHandler> = Arc::new(EchoHandler);
+    let _victim = MeshAgent::connect(victim_kp, &relay_url, allow_all_acl(), handler)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Revoke victim's key via HTTP (reconstruct keypair from secret bytes).
+    let victim_kp_for_revoke = AgentKeypair::from_bytes(&victim_secret);
+    let revocation = KeyRevocation::new(&victim_kp_for_revoke, Some("compromised".into()));
+    let resp = reqwest::Client::new()
+        .post(format!("{http}/revoke"))
+        .json(&revocation)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    // Verify: request to revoked agent fails.
+    let attacker = MeshClient::connect(attacker_kp, &relay_url).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let result = attacker
+        .request_plaintext(
+            &victim_id,
+            serde_json::json!({"capability": "echo"}),
+            Duration::from_secs(3),
+        )
+        .await;
+    assert!(result.is_err());
+}
+
+// --- Streaming response ---
+
+#[tokio::test]
+async fn streaming_response() {
+    let (relay_url, _http) = start_relay().await;
+
+    let server_kp = AgentKeypair::generate();
+    let server_id = server_kp.agent_id();
+    let client_kp = AgentKeypair::generate();
+    let client_id = client_kp.agent_id();
+
+    let mut acl = AclPolicy::new();
+    acl.add_rule(AclRule {
+        source: client_id.clone(),
+        target: server_id.clone(),
+        allowed_capabilities: vec!["llm".into()],
+    });
+
+    struct StreamHandler;
+
+    #[async_trait::async_trait]
+    impl RequestHandler for StreamHandler {
+        async fn handle(
+            &self,
+            _from: &AgentId,
+            _payload: &serde_json::Value,
+            _cancel: CancelToken,
+        ) -> serde_json::Value {
+            serde_json::json!({"error": "use streaming"})
+        }
+
+        async fn handle_stream(
+            &self,
+            _from: &AgentId,
+            _payload: &serde_json::Value,
+            _cancel: CancelToken,
+        ) -> ValueStream {
+            let tokens = vec![
+                serde_json::json!({"token": "Hello"}),
+                serde_json::json!({"token": " world"}),
+                serde_json::json!({"token": "!"}),
+            ];
+            Box::pin(futures_util::stream::iter(tokens))
+        }
+    }
+
+    let handler: Arc<dyn RequestHandler> = Arc::new(StreamHandler);
+    let _server = MeshAgent::connect(server_kp, &relay_url, acl, handler)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = MeshClient::connect(client_kp, &relay_url).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut stream_rx = client
+        .request_stream(
+            &server_id,
+            serde_json::json!({"capability": "llm", "prompt": "test"}),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+    let mut chunks = Vec::new();
+    while let Some(result) = stream_rx.next().await {
+        chunks.push(result.unwrap());
+    }
+
+    assert_eq!(chunks.len(), 3);
+    assert_eq!(chunks[0]["token"], "Hello");
+    assert_eq!(chunks[1]["token"], " world");
+    assert_eq!(chunks[2]["token"], "!");
+}
+
+// --- Request cancellation via timeout ---
+
+#[tokio::test]
+async fn request_cancellation_timeout() {
+    let (relay_url, _http) = start_relay().await;
+
+    let server_kp = AgentKeypair::generate();
+    let server_id = server_kp.agent_id();
+    let client_kp = AgentKeypair::generate();
+    let client_id = client_kp.agent_id();
+
+    let mut acl = AclPolicy::new();
+    acl.add_rule(AclRule {
+        source: client_id.clone(),
+        target: server_id.clone(),
+        allowed_capabilities: vec!["slow".into()],
+    });
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let was_cancelled = Arc::new(AtomicBool::new(false));
+    let was_cancelled_clone = Arc::clone(&was_cancelled);
+
+    struct SlowHandler {
+        was_cancelled: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl RequestHandler for SlowHandler {
+        async fn handle(
+            &self,
+            _from: &AgentId,
+            _payload: &serde_json::Value,
+            mut cancel: CancelToken,
+        ) -> serde_json::Value {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    self.was_cancelled.store(true, Ordering::SeqCst);
+                    serde_json::json!({"cancelled": true})
+                }
+                _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                    serde_json::json!({"cancelled": false})
+                }
+            }
+        }
+    }
+
+    let handler: Arc<dyn RequestHandler> = Arc::new(SlowHandler {
+        was_cancelled: was_cancelled_clone,
+    });
+    let _server = MeshAgent::connect(server_kp, &relay_url, acl, handler)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = MeshClient::connect(client_kp, &relay_url).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Short timeout should cause cancellation.
+    let result = client
+        .request(
+            &server_id,
+            serde_json::json!({"capability": "slow"}),
+            Duration::from_millis(500),
+        )
+        .await;
+    assert!(result.is_err());
+}
+
+// --- Rate limiting ---
+
+#[tokio::test]
+async fn rate_limiting() {
+    // Use a relay with a low rate limit.
+    // Burst must be high enough for Noise handshake messages + a few requests.
+    let hub = Arc::new(Hub::with_rate_limit(5.0, 8.0));
+    let app = agent_mesh_relay::app(hub);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, app).into_future());
+    let relay_url = format!("ws://127.0.0.1:{}/ws", addr.port());
+
+    let server_kp = AgentKeypair::generate();
+    let server_id = server_kp.agent_id();
+    let client_kp = AgentKeypair::generate();
+    let client_id = client_kp.agent_id();
+
+    let mut acl = AclPolicy::new();
+    acl.add_rule(AclRule {
+        source: client_id.clone(),
+        target: server_id.clone(),
+        allowed_capabilities: vec!["test".into()],
+    });
+
+    let handler: Arc<dyn RequestHandler> = Arc::new(EchoHandler);
+    let _server = MeshAgent::connect(server_kp, &relay_url, acl, handler)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = MeshClient::connect(client_kp, &relay_url).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send many requests rapidly.
+    let mut successes = 0u32;
+    let mut failures = 0u32;
+    for _ in 0..10 {
+        match client
+            .request(
+                &server_id,
+                serde_json::json!({"capability": "test"}),
+                Duration::from_millis(1500),
+            )
+            .await
+        {
+            Ok(_) => successes += 1,
+            Err(_) => failures += 1,
+        }
+    }
+
+    assert!(successes > 0, "at least some requests should succeed");
+    assert!(failures > 0, "some requests should be rejected");
 }

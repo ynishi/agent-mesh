@@ -600,6 +600,43 @@ async fn handle_handshake(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn send_response(
+    keypair: &Arc<AgentKeypair>,
+    sink: &Arc<Mutex<WsSink>>,
+    sessions: &SessionMap,
+    peer_key: &str,
+    to: AgentId,
+    msg_type: MessageType,
+    in_reply_to: Option<Uuid>,
+    payload: serde_json::Value,
+    encrypt: bool,
+) -> Result<(), String> {
+    let response = if encrypt {
+        let mut sess = sessions.lock().await;
+        let transport = sess
+            .get_mut(peer_key)
+            .ok_or_else(|| format!("no noise session for {peer_key}"))?;
+        let plaintext = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+        let ciphertext = transport.encrypt(&plaintext).map_err(|e| e.to_string())?;
+        MeshEnvelope::new_encrypted(
+            keypair,
+            to,
+            msg_type,
+            in_reply_to,
+            serde_json::Value::String(ciphertext),
+        )
+        .map_err(|e| e.to_string())?
+    } else {
+        MeshEnvelope::new_signed_reply(keypair, to, msg_type, in_reply_to, payload)
+            .map_err(|e| e.to_string())?
+    };
+
+    let json = serde_json::to_string(&response).map_err(|e| e.to_string())?;
+    let mut s = sink.lock().await;
+    s.send(Message::text(json)).await.map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,41 +695,4 @@ mod tests {
         assert!(token.is_cancelled());
         assert!(token2.is_cancelled());
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn send_response(
-    keypair: &Arc<AgentKeypair>,
-    sink: &Arc<Mutex<WsSink>>,
-    sessions: &SessionMap,
-    peer_key: &str,
-    to: AgentId,
-    msg_type: MessageType,
-    in_reply_to: Option<Uuid>,
-    payload: serde_json::Value,
-    encrypt: bool,
-) -> Result<(), String> {
-    let response = if encrypt {
-        let mut sess = sessions.lock().await;
-        let transport = sess
-            .get_mut(peer_key)
-            .ok_or_else(|| format!("no noise session for {peer_key}"))?;
-        let plaintext = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
-        let ciphertext = transport.encrypt(&plaintext).map_err(|e| e.to_string())?;
-        MeshEnvelope::new_encrypted(
-            keypair,
-            to,
-            msg_type,
-            in_reply_to,
-            serde_json::Value::String(ciphertext),
-        )
-        .map_err(|e| e.to_string())?
-    } else {
-        MeshEnvelope::new_signed_reply(keypair, to, msg_type, in_reply_to, payload)
-            .map_err(|e| e.to_string())?
-    };
-
-    let json = serde_json::to_string(&response).map_err(|e| e.to_string())?;
-    let mut s = sink.lock().await;
-    s.send(Message::text(json)).await.map_err(|e| e.to_string())
 }

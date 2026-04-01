@@ -1,7 +1,5 @@
-mod config;
-mod node;
-mod proxy;
-
+use agent_meshd::config::NodeConfig;
+use agent_meshd::node::MeshNode;
 use anyhow::{bail, Result};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -37,7 +35,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let cfg = config::NodeConfig::from_cli(
+    let cfg = NodeConfig::from_cli(
         cli.config.as_deref(),
         cli.relay.as_deref(),
         cli.local_agent.as_deref(),
@@ -59,6 +57,6 @@ async fn main() -> Result<()> {
 
     tracing::info!(agent = cfg.agent_id_display(), relay = %cfg.relay_url, "starting meshd");
 
-    let node = node::MeshNode::new(cfg)?;
+    let node = MeshNode::new(cfg)?;
     node.run().await
 }
