@@ -1,0 +1,10 @@
+---
+source: crates/agent-mesh-relay/tests/e2e.rs
+expression: resp
+---
+{
+  "agents": [],
+  "buffered_agents": 0,
+  "connected_agents": 0,
+  "revoked_agents": 0
+}
