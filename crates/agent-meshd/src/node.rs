@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::{MeshCredentials, NodeConfig};
+use crate::local_api::{self, LocalApiState};
 use crate::proxy;
 
 type WsStream =
@@ -146,6 +147,26 @@ impl MeshNode {
 
     pub async fn run(&self) -> Result<()> {
         self.start_acl_reload_listener();
+        tokio::select! {
+            r = self.local_api_server() => {
+                tracing::error!(error = ?r, "local API server exited");
+                r
+            }
+            r = self.relay_loop() => {
+                tracing::error!(error = ?r, "relay loop exited");
+                r
+            }
+        }
+    }
+
+    /// Relay reconnect loop. If `relay_url` is empty, waits indefinitely so the
+    /// Local API can still operate (Local-API-only mode).
+    async fn relay_loop(&self) -> Result<()> {
+        if self.relay_url.is_empty() {
+            tracing::info!("relay_url not configured, skipping relay connection");
+            std::future::pending::<()>().await;
+            return Ok(());
+        }
         loop {
             match self.connect_and_serve().await {
                 Ok(()) => tracing::info!("relay connection closed, reconnecting..."),
@@ -153,6 +174,40 @@ impl MeshNode {
             }
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
+    }
+
+    /// Bind the UDS Local API socket and serve.
+    async fn local_api_server(&self) -> Result<()> {
+        let sock_path = self.mesh_dir.join("meshd.sock");
+
+        // Remove stale socket from previous run (ignore ENOENT).
+        let _ = std::fs::remove_file(&sock_path);
+
+        let listener = tokio::net::UnixListener::bind(&sock_path)
+            .map_err(|e| anyhow::anyhow!("failed to bind UDS {}: {e}", sock_path.display()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o700)).map_err(
+                |e| anyhow::anyhow!("failed to set permissions on {}: {e}", sock_path.display()),
+            )?;
+        }
+
+        let state = LocalApiState {
+            cp_url: Arc::new(tokio::sync::RwLock::new(self.cp_url.clone())),
+            bearer_token: Arc::clone(&self.bearer_token),
+            node_state: Arc::clone(&self.state),
+            http_client: reqwest::Client::new(),
+            mesh_dir: self.mesh_dir.clone(),
+        };
+
+        let router = local_api::router(state);
+        tracing::info!(path = %sock_path.display(), "local API listening on UDS");
+
+        axum::serve(listener, router.into_make_service())
+            .await
+            .map_err(|e| anyhow::anyhow!("local API server error: {e}"))
     }
 
     async fn connect_and_serve(&self) -> Result<()> {

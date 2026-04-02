@@ -50,11 +50,14 @@ async fn main() -> Result<()> {
         cli.cp_url.as_deref(),
     )?;
 
-    if cfg.relay_url.is_empty() {
-        bail!("--relay is required (or set relay_url in config file)");
+    // relay_url is only required when cp_url is also absent.
+    // With cp_url only, meshd runs in Local-API-only mode.
+    if cfg.relay_url.is_empty() && cfg.cp_url.is_none() {
+        bail!("--relay or --cp-url is required (set relay_url / cp_url in config file or via CLI)");
     }
-    if cfg.local_agent_url.is_empty() {
-        bail!("--local-agent is required (or set local_agent_url in config file)");
+    // local_agent_url is only needed when relay is active.
+    if !cfg.relay_url.is_empty() && cfg.local_agent_url.is_empty() {
+        bail!("--local-agent is required when relay is configured (or set local_agent_url in config file)");
     }
     if cfg.secret_key_hex.is_empty() {
         bail!("--secret-key is required (or set secret_key_hex in config file, or MESH_SECRET_KEY env)");

@@ -33,3 +33,8 @@ axum = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
+hyper = { version = "1", features = ["http1", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+tower = { workspace = true }
