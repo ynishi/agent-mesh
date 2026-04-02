@@ -172,6 +172,7 @@ async fn start_registry() -> Result<SocketAddr> {
         db,
         oauth_config: None,
         http_client: reqwest::Client::new(),
+        sync_hub: std::sync::Arc::new(agent_mesh_registry::sync::SyncHub::new()),
     };
     let app = agent_mesh_registry::app(state);
     let listener = TcpListener::bind("127.0.0.1:0").await?;

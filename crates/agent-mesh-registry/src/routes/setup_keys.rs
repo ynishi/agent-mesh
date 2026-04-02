@@ -147,6 +147,7 @@ mod tests {
             db: Arc::new(db),
             oauth_config: None,
             http_client: reqwest::Client::new(),
+            sync_hub: Arc::new(crate::sync::SyncHub::new()),
         }
     }
 

@@ -44,7 +44,6 @@ pub async fn verify_agent(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::auth::hash_token;
     use crate::{app, AppState};
     use agent_mesh_core::agent_card::AgentCardRegistration;
@@ -64,6 +63,7 @@ mod tests {
             db,
             oauth_config: None,
             http_client: reqwest::Client::new(),
+            sync_hub: Arc::new(crate::sync::SyncHub::new()),
         }
     }
 

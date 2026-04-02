@@ -1,9 +1,14 @@
+use std::collections::HashSet;
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
 
+use agent_mesh_core::agent_card::AgentCardQuery;
+use agent_mesh_core::identity::GroupId;
 use agent_mesh_core::message::KeyRevocation;
+use agent_mesh_core::sync::SyncEvent;
 
 use crate::auth::AuthUser;
 use crate::db::RevocationRow;
@@ -34,8 +39,6 @@ impl From<RevocationRow> for RevocationResponse {
 /// `POST /revocations` — submit a signed key revocation.
 ///
 /// The signature is verified before storing. Returns 400 if verification fails.
-///
-/// TODO: broadcast after SyncHub is available (Subtask 2).
 pub async fn revoke_key(
     State(state): State<AppState>,
     AuthUser(user_id): AuthUser,
@@ -62,6 +65,22 @@ pub async fn revoke_key(
         .db
         .create_revocation(&row)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Broadcast KeyRevoked to all groups that contain this agent.
+    // If the agent is not found in agent_cards (e.g. already deleted), skip broadcast.
+    let query = AgentCardQuery {
+        agent_id: Some(rev.agent_id.clone()),
+        ..Default::default()
+    };
+    if let Ok(cards) = state.db.search(&query) {
+        let group_ids: HashSet<GroupId> = cards.iter().map(|c| c.group_id).collect();
+        for gid in group_ids {
+            state
+                .sync_hub
+                .broadcast_to_group(&gid, &SyncEvent::KeyRevoked(rev.clone()))
+                .await;
+        }
+    }
 
     Ok((StatusCode::CREATED, Json(RevocationResponse::from(row))))
 }
@@ -101,6 +120,7 @@ mod tests {
             db,
             oauth_config: None,
             http_client: reqwest::Client::new(),
+            sync_hub: Arc::new(crate::sync::SyncHub::new()),
         }
     }
 

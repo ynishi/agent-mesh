@@ -8,6 +8,7 @@ use agent_mesh_core::user::{
 };
 use agent_mesh_registry::auth::hash_token;
 use agent_mesh_registry::db::Database;
+use agent_mesh_registry::sync::SyncHub;
 use agent_mesh_registry::AppState;
 use uuid::Uuid;
 
@@ -17,6 +18,7 @@ async fn start_registry() -> (String, Arc<Database>) {
         db: db.clone(),
         oauth_config: None,
         http_client: reqwest::Client::new(),
+        sync_hub: Arc::new(SyncHub::new()),
     };
     let app = agent_mesh_registry::app(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

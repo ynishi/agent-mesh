@@ -3,6 +3,8 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use agent_mesh_core::sync::SyncEvent;
+
 use crate::auth::AuthUser;
 use crate::db::AclRuleRow;
 use crate::AppState;
@@ -46,8 +48,6 @@ impl TryFrom<AclRuleRow> for AclRuleResponse {
 }
 
 /// `POST /acl` — create an ACL rule scoped to the authenticated user's group.
-///
-/// TODO: broadcast after SyncHub is available (Subtask 2).
 pub async fn create_rule(
     State(state): State<AppState>,
     AuthUser(user_id): AuthUser,
@@ -75,6 +75,15 @@ pub async fn create_rule(
         .db
         .create_acl_rule(&row)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let sync_msg = state
+        .db
+        .build_sync_message_for_group(&group_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    state
+        .sync_hub
+        .broadcast_to_group(&group_id, &SyncEvent::AclUpdated(sync_msg.acl_rules))
+        .await;
 
     let resp = AclRuleResponse::try_from(row)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -123,6 +132,14 @@ pub async fn delete_rule(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if deleted {
+        let sync_msg = state
+            .db
+            .build_sync_message_for_group(&group_id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        state
+            .sync_hub
+            .broadcast_to_group(&group_id, &SyncEvent::AclUpdated(sync_msg.acl_rules))
+            .await;
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err((StatusCode::NOT_FOUND, "acl rule not found".into()))
@@ -150,6 +167,7 @@ mod tests {
             db,
             oauth_config: None,
             http_client: reqwest::Client::new(),
+            sync_hub: Arc::new(crate::sync::SyncHub::new()),
         }
     }
 

@@ -156,6 +156,7 @@ mod tests {
             db: Arc::new(db),
             oauth_config: None,
             http_client: reqwest::Client::new(),
+            sync_hub: Arc::new(crate::sync::SyncHub::new()),
         }
     }
 
@@ -224,7 +225,7 @@ mod tests {
         let state = test_state();
         let user = make_test_user(&state, "user1");
         let raw_token = "token-user1";
-        make_token(&state, user.id.clone(), raw_token);
+        make_token(&state, user.id, raw_token);
 
         let app = build_app(state.clone());
         let req = HttpRequest::builder()
@@ -259,7 +260,7 @@ mod tests {
         let state = test_state();
         let user = make_test_user(&state, "user2");
         let raw_token = "token-user2";
-        make_token(&state, user.id.clone(), raw_token);
+        make_token(&state, user.id, raw_token);
 
         let group = setup_group(&state, raw_token, "list-test-group").await;
 
@@ -286,7 +287,7 @@ mod tests {
         let state = test_state();
         let owner = make_test_user(&state, "owner3");
         let owner_token = "token-owner3";
-        make_token(&state, owner.id.clone(), owner_token);
+        make_token(&state, owner.id, owner_token);
 
         let new_member = make_test_user(&state, "member3");
 
@@ -311,11 +312,11 @@ mod tests {
         let state = test_state();
         let owner = make_test_user(&state, "owner4");
         let owner_token = "token-owner4";
-        make_token(&state, owner.id.clone(), owner_token);
+        make_token(&state, owner.id, owner_token);
 
         let admin = make_test_user(&state, "admin4");
         let admin_token = "token-admin4";
-        make_token(&state, admin.id.clone(), admin_token);
+        make_token(&state, admin.id, admin_token);
 
         let new_member = make_test_user(&state, "member4");
 
@@ -325,8 +326,8 @@ mod tests {
         state
             .db
             .add_group_member(&GroupMember {
-                group_id: group.id.clone(),
-                user_id: admin.id.clone(),
+                group_id: group.id,
+                user_id: admin.id,
                 role: GroupRole::Admin,
             })
             .expect("add admin");
@@ -350,11 +351,11 @@ mod tests {
         let state = test_state();
         let owner = make_test_user(&state, "owner5");
         let owner_token = "token-owner5";
-        make_token(&state, owner.id.clone(), owner_token);
+        make_token(&state, owner.id, owner_token);
 
         let plain_member = make_test_user(&state, "plain5");
         let plain_token = "token-plain5";
-        make_token(&state, plain_member.id.clone(), plain_token);
+        make_token(&state, plain_member.id, plain_token);
 
         let another = make_test_user(&state, "another5");
 
@@ -364,8 +365,8 @@ mod tests {
         state
             .db
             .add_group_member(&GroupMember {
-                group_id: group.id.clone(),
-                user_id: plain_member.id.clone(),
+                group_id: group.id,
+                user_id: plain_member.id,
                 role: GroupRole::Member,
             })
             .expect("add plain member");
@@ -389,11 +390,11 @@ mod tests {
         let state = test_state();
         let owner = make_test_user(&state, "owner6");
         let owner_token = "token-owner6";
-        make_token(&state, owner.id.clone(), owner_token);
+        make_token(&state, owner.id, owner_token);
 
         let outsider = make_test_user(&state, "outsider6");
         let outsider_token = "token-outsider6";
-        make_token(&state, outsider.id.clone(), outsider_token);
+        make_token(&state, outsider.id, outsider_token);
 
         let target = make_test_user(&state, "target6");
 
@@ -418,7 +419,7 @@ mod tests {
         let state = test_state();
         let owner = make_test_user(&state, "owner7");
         let owner_token = "token-owner7";
-        make_token(&state, owner.id.clone(), owner_token);
+        make_token(&state, owner.id, owner_token);
 
         let member = make_test_user(&state, "member7");
 
@@ -427,8 +428,8 @@ mod tests {
         state
             .db
             .add_group_member(&GroupMember {
-                group_id: group.id.clone(),
-                user_id: member.id.clone(),
+                group_id: group.id,
+                user_id: member.id,
                 role: GroupRole::Member,
             })
             .expect("add member");
@@ -450,7 +451,7 @@ mod tests {
         let state = test_state();
         let owner = make_test_user(&state, "owner8");
         let owner_token = "token-owner8";
-        make_token(&state, owner.id.clone(), owner_token);
+        make_token(&state, owner.id, owner_token);
 
         let group = setup_group(&state, owner_token, "remove-owner-group").await;
 

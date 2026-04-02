@@ -62,6 +62,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "futures-util",
  "rand 0.8.5",
  "reqwest",
  "rusqlite",

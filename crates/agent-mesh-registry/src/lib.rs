@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod db;
 pub mod routes;
+pub mod sync;
 
 use axum::middleware;
 use axum::routing::{delete, get, post, put};
@@ -8,6 +9,7 @@ use axum::Router;
 use std::sync::Arc;
 
 use crate::db::Database;
+use crate::sync::SyncHub;
 
 /// OAuth provider configuration for Device Flow authentication.
 #[derive(Clone)]
@@ -48,6 +50,7 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub oauth_config: Option<OAuthConfig>,
     pub http_client: reqwest::Client,
+    pub sync_hub: Arc<SyncHub>,
 }
 
 /// Build the registry router with the given state.
@@ -97,6 +100,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/status", get(routes::status::get_status))
         .route("/gate/verify", post(routes::gate::verify_agent))
+        .route("/sync", get(sync::ws_handler))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

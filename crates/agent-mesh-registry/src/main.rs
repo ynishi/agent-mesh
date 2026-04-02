@@ -1,4 +1,5 @@
 use agent_mesh_registry::db::Database;
+use agent_mesh_registry::sync::SyncHub;
 use agent_mesh_registry::{AppState, OAuthConfig};
 use anyhow::{bail, Result};
 use clap::Parser;
@@ -73,6 +74,7 @@ async fn main() -> Result<()> {
         db,
         oauth_config,
         http_client: reqwest::Client::new(),
+        sync_hub: Arc::new(SyncHub::new()),
     };
 
     let app = agent_mesh_registry::app(state).layer(TraceLayer::new_for_http());
