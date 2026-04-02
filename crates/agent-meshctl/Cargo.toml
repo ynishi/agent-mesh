@@ -28,6 +28,10 @@ ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 base64 = { workspace = true }
 hex = "0.4"
+hyper = { version = "1", features = ["http1", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
 
 [dev-dependencies]
 agent-mesh-relay = { workspace = true }
