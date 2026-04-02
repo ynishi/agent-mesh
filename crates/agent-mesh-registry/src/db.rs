@@ -173,6 +173,13 @@ impl Database {
     }
 
     pub fn search(&self, query: &AgentCardQuery) -> Result<Vec<AgentCard>> {
+        // If group_ids is explicitly set to an empty list, no groups match — return early.
+        if let Some(ref group_ids) = query.group_ids {
+            if group_ids.is_empty() {
+                return Ok(vec![]);
+            }
+        }
+
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let mut sql = String::from(
@@ -192,6 +199,17 @@ impl Database {
             sql.push_str(&format!(
                 " AND (name LIKE ?{idx} OR description LIKE ?{idx})"
             ));
+        }
+        if let Some(ref group_ids) = query.group_ids {
+            // group_ids is guaranteed non-empty here (early return above handles empty case).
+            let placeholders: Vec<String> = group_ids
+                .iter()
+                .map(|gid| {
+                    param_values.push(gid.0.to_string());
+                    format!("?{}", param_values.len())
+                })
+                .collect();
+            sql.push_str(&format!(" AND group_id IN ({})", placeholders.join(",")));
         }
 
         sql.push_str(" ORDER BY updated_at DESC LIMIT 100");
@@ -1476,5 +1494,142 @@ mod tests {
         let (user_id, _) = ensure_test_user(&db);
         let result = db.revoke_setup_key(&Uuid::new_v4(), &user_id).unwrap();
         assert!(!result);
+    }
+
+    // ── search with group_ids tests ───────────────────────────────────────────
+
+    fn ensure_test_user2(db: &Database) -> (UserId, GroupId) {
+        let user_id = UserId::parse_str("00000000-0000-0000-0000-000000000011").unwrap();
+        let group_id = GroupId::parse_str("00000000-0000-0000-0000-000000000012").unwrap();
+        let conn = db.conn.lock().expect("lock");
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR IGNORE INTO users (id, external_id, provider, display_name, created_at)
+             VALUES (?1, 'test2', 'test', 'Test User2', ?2)",
+            params!["00000000-0000-0000-0000-000000000011", now],
+        )
+        .expect("insert test user2");
+        conn.execute(
+            "INSERT OR IGNORE INTO groups (id, name, created_by, created_at)
+             VALUES (?1, 'test-group2', ?2, ?3)",
+            params![
+                "00000000-0000-0000-0000-000000000012",
+                "00000000-0000-0000-0000-000000000011",
+                now
+            ],
+        )
+        .expect("insert test group2");
+        (user_id, group_id)
+    }
+
+    #[test]
+    fn search_with_group_ids_single_group() {
+        let db = test_db();
+        let (owner_id, group_id) = ensure_test_user(&db);
+        let (owner_id2, group_id2) = ensure_test_user2(&db);
+
+        db.register(
+            &make_reg("a1", "Alice", vec!["scheduling"]),
+            owner_id,
+            group_id,
+        )
+        .unwrap();
+        db.register(
+            &make_reg("a2", "Bob", vec!["billing"]),
+            owner_id2,
+            group_id2,
+        )
+        .unwrap();
+
+        // Search scoped to group1 only
+        let results = db
+            .search(&AgentCardQuery {
+                group_ids: Some(vec![group_id]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "Alice");
+    }
+
+    #[test]
+    fn search_with_group_ids_multi_group() {
+        let db = test_db();
+        let (owner_id, group_id) = ensure_test_user(&db);
+        let (owner_id2, group_id2) = ensure_test_user2(&db);
+
+        db.register(
+            &make_reg("a1", "Alice", vec!["scheduling"]),
+            owner_id,
+            group_id,
+        )
+        .unwrap();
+        db.register(
+            &make_reg("a2", "Bob", vec!["billing"]),
+            owner_id2,
+            group_id2,
+        )
+        .unwrap();
+
+        // Search scoped to both groups
+        let results = db
+            .search(&AgentCardQuery {
+                group_ids: Some(vec![group_id, group_id2]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        let names: Vec<&str> = results.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"Alice"));
+        assert!(names.contains(&"Bob"));
+    }
+
+    #[test]
+    fn search_with_group_ids_empty_returns_nothing() {
+        let db = test_db();
+        let (owner_id, group_id) = ensure_test_user(&db);
+
+        db.register(
+            &make_reg("a1", "Alice", vec!["scheduling"]),
+            owner_id,
+            group_id,
+        )
+        .unwrap();
+
+        // Empty group_ids → early return with empty vec
+        let results = db
+            .search(&AgentCardQuery {
+                group_ids: Some(vec![]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            results.is_empty(),
+            "search with empty group_ids should return nothing"
+        );
+    }
+
+    #[test]
+    fn search_without_group_ids_returns_all() {
+        let db = test_db();
+        let (owner_id, group_id) = ensure_test_user(&db);
+        let (owner_id2, group_id2) = ensure_test_user2(&db);
+
+        db.register(
+            &make_reg("a1", "Alice", vec!["scheduling"]),
+            owner_id,
+            group_id,
+        )
+        .unwrap();
+        db.register(
+            &make_reg("a2", "Bob", vec!["billing"]),
+            owner_id2,
+            group_id2,
+        )
+        .unwrap();
+
+        // No group_ids filter → returns all
+        let results = db.search(&AgentCardQuery::default()).unwrap();
+        assert_eq!(results.len(), 2);
     }
 }

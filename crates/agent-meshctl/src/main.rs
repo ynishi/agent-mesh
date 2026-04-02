@@ -1,6 +1,7 @@
 use agent_meshctl::{commands, daemon};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -97,6 +98,57 @@ enum Commands {
         /// Allowed capabilities (comma-separated).
         #[arg(long)]
         allow: String,
+    },
+    /// Manage setup keys for non-interactive agent registration.
+    SetupKey {
+        #[command(subcommand)]
+        subcommand: SetupKeyCommands,
+    },
+    /// Register an agent using a setup key.
+    ///
+    /// Sends a registration request to meshd, which proxies it to the Control Plane.
+    /// On success, saves the issued API token to ~/.mesh/config.toml.
+    /// CP/Relay connection is NOT started automatically (out of scope for this command).
+    Up {
+        /// Setup key (or reads from MESH_SETUP_KEY env).
+        #[arg(long)]
+        setup_key: Option<String>,
+        /// Agent name.
+        #[arg(long)]
+        name: String,
+        /// Capabilities (comma-separated).
+        #[arg(long)]
+        capabilities: String,
+        /// Secret key hex (or reads from MESH_SECRET_KEY env).
+        #[arg(long)]
+        secret_key: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SetupKeyCommands {
+    /// Create a new setup key for non-interactive agent registration.
+    Create {
+        /// Group ID to scope the setup key to.
+        #[arg(long)]
+        group_id: String,
+        /// Key usage: "one-off" (single use) or "reusable".
+        #[arg(long, default_value = "one-off")]
+        usage: String,
+        /// Maximum number of uses (for reusable keys).
+        #[arg(long)]
+        max_uses: Option<u32>,
+        /// Validity in hours from now.
+        #[arg(long, default_value = "24")]
+        expires_in_hours: u64,
+    },
+    /// List all setup keys.
+    List,
+    /// Revoke a setup key by ID.
+    Revoke {
+        /// Setup key ID to revoke.
+        #[arg(long)]
+        id: String,
     },
 }
 
@@ -200,6 +252,33 @@ async fn main() -> Result<()> {
                         commands::group_remove_member(&client, &group_id, &user_id).await
                     }
                 },
+                Commands::SetupKey { subcommand } => match subcommand {
+                    SetupKeyCommands::Create {
+                        group_id,
+                        usage,
+                        max_uses,
+                        expires_in_hours,
+                    } => {
+                        commands::setup_key_create(
+                            &client,
+                            &group_id,
+                            &usage,
+                            max_uses,
+                            expires_in_hours,
+                        )
+                        .await
+                    }
+                    SetupKeyCommands::List => commands::setup_key_list(&client).await,
+                    SetupKeyCommands::Revoke { id } => {
+                        commands::setup_key_revoke(&client, &id).await
+                    }
+                },
+                Commands::Up {
+                    setup_key,
+                    name,
+                    capabilities,
+                    secret_key,
+                } => up_with_setup_key(&client, setup_key, &name, &capabilities, secret_key).await,
                 // Already handled above
                 Commands::Keygen | Commands::Request { .. } | Commands::Acl { .. } => {
                     unreachable!()
@@ -207,4 +286,101 @@ async fn main() -> Result<()> {
             }
         }
     }
+}
+
+/// Minimal credentials structure for saving to ~/.mesh/config.toml.
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct MeshCredentials {
+    bearer_token: Option<String>,
+    cp_url: Option<String>,
+}
+
+impl MeshCredentials {
+    fn save(&self, mesh_dir: &std::path::Path) -> Result<()> {
+        std::fs::create_dir_all(mesh_dir)
+            .with_context(|| format!("failed to create dir {}", mesh_dir.display()))?;
+        let path = mesh_dir.join("config.toml");
+        let content = toml::to_string(self).context("failed to serialize credentials")?;
+        std::fs::write(&path, content)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Registers an agent using a setup key and saves the issued API token.
+///
+/// CP/Relay connection is not started (out of scope for this command).
+async fn up_with_setup_key(
+    client: &daemon::MeshdClient,
+    setup_key_arg: Option<String>,
+    name: &str,
+    capabilities_csv: &str,
+    secret_key_arg: Option<String>,
+) -> Result<()> {
+    // 1. Resolve setup key.
+    let setup_key = match setup_key_arg {
+        Some(k) => k,
+        None => std::env::var("MESH_SETUP_KEY")
+            .context("no --setup-key provided and MESH_SETUP_KEY env not set")?,
+    };
+
+    // 2. Resolve secret key and derive agent_id.
+    let keypair = commands::resolve_secret_key(secret_key_arg.as_deref())?;
+    let agent_id = keypair.agent_id().to_string();
+
+    // 3. Build capabilities list.
+    let caps: Vec<serde_json::Value> = capabilities_csv
+        .split(',')
+        .map(|s| serde_json::json!({ "name": s.trim() }))
+        .collect();
+
+    // 4. POST /register-with-key via meshd.
+    let body = serde_json::json!({
+        "setup_key": setup_key,
+        "agent_id": agent_id,
+        "name": name,
+        "capabilities": caps,
+    });
+
+    let (status, resp) = client.post("/register-with-key", &body).await?;
+
+    if !status.is_success() {
+        anyhow::bail!("Registration failed ({}): {}", status, resp);
+    }
+
+    // 5. Extract api_token from response.
+    let api_token = resp
+        .get("api_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("api_token missing from response: {resp}"))?
+        .to_string();
+
+    let cp_url = resp
+        .get("cp_url")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
+    // 6. Resolve mesh_dir from socket path parent.
+    let sock_path = daemon::MeshdClient::default_sock_path()?;
+    let mesh_dir = sock_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine mesh_dir from socket path"))?;
+
+    // 7. Save credentials.
+    let creds = MeshCredentials {
+        bearer_token: Some(api_token),
+        cp_url,
+    };
+    creds.save(mesh_dir)?;
+
+    println!("Registered successfully. Token saved.");
+    Ok(())
 }

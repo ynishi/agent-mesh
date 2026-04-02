@@ -75,6 +75,10 @@ pub struct AgentCardQuery {
     /// Filter by agent ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<AgentId>,
+    /// Group-scoped discovery: only return agents in these groups.
+    /// Injected by the handler (not user-supplied via query string).
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub group_ids: Option<Vec<GroupId>>,
 }
 
 #[cfg(test)]
@@ -126,5 +130,38 @@ mod tests {
         assert_eq!(decoded.owner_id, card.owner_id);
         assert_eq!(decoded.group_id, card.group_id);
         assert_eq!(decoded.name, card.name);
+    }
+
+    #[test]
+    fn agent_card_query_group_ids_roundtrip() {
+        let gid = fixed_group_id();
+        let mut query = AgentCardQuery::default();
+        query.group_ids = Some(vec![gid]);
+
+        // group_ids is serialized when Some.
+        let json = serde_json::to_string(&query).unwrap();
+        assert!(
+            json.contains("group_ids"),
+            "group_ids should be serialized: {json}"
+        );
+
+        // Deserializing from JSON must NOT populate group_ids (skip_deserializing).
+        let decoded: AgentCardQuery = serde_json::from_str(&json).unwrap();
+        assert!(
+            decoded.group_ids.is_none(),
+            "group_ids must not be deserialized from JSON (skip_deserializing)"
+        );
+    }
+
+    #[test]
+    fn agent_card_query_group_ids_not_injectable_via_json_field() {
+        let gid = fixed_group_id();
+        // Attempt to inject group_ids via a JSON payload (simulates attacker-controlled input).
+        let attacker_json = format!(r#"{{"group_ids":["{}"]}}"#, gid.0);
+        let decoded: AgentCardQuery = serde_json::from_str(&attacker_json).unwrap();
+        assert!(
+            decoded.group_ids.is_none(),
+            "group_ids must not be injectable via JSON deserialization (skip_deserializing)"
+        );
     }
 }

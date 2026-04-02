@@ -55,8 +55,12 @@ pub async fn create_setup_key(
             "not a member of the specified group".to_string(),
         ))?;
 
-    let expires_secs = i64::try_from(req.expires_in_secs)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "expires_in_secs too large".to_string()))?;
+    let expires_secs = i64::try_from(req.expires_in_secs).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "expires_in_secs too large".to_string(),
+        )
+    })?;
 
     let now = chrono::Utc::now();
     let expires_at = now + chrono::Duration::seconds(expires_secs);

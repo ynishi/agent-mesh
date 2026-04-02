@@ -46,6 +46,10 @@ pub fn router(state: LocalApiState) -> Router {
             delete(proxy_groups_remove_member),
         )
         .route("/revocations", post(proxy_revocations_create))
+        .route("/setup-keys", post(proxy_setup_keys_create))
+        .route("/setup-keys", get(proxy_setup_keys_list))
+        .route("/setup-keys/{id}", delete(proxy_setup_keys_revoke))
+        .route("/register-with-key", post(proxy_register_with_key))
         .with_state(state)
 }
 
@@ -237,6 +241,45 @@ async fn proxy_revocations_create(
     proxy_to_cp(&state, reqwest::Method::POST, "/revocations", Some(body)).await
 }
 
+async fn proxy_setup_keys_create(
+    State(state): State<LocalApiState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Response, (StatusCode, String)> {
+    proxy_to_cp(&state, reqwest::Method::POST, "/setup-keys", Some(body)).await
+}
+
+async fn proxy_setup_keys_list(
+    State(state): State<LocalApiState>,
+) -> Result<Response, (StatusCode, String)> {
+    proxy_to_cp(&state, reqwest::Method::GET, "/setup-keys", None).await
+}
+
+async fn proxy_setup_keys_revoke(
+    State(state): State<LocalApiState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    proxy_to_cp(
+        &state,
+        reqwest::Method::DELETE,
+        &format!("/setup-keys/{id}"),
+        None,
+    )
+    .await
+}
+
+async fn proxy_register_with_key(
+    State(state): State<LocalApiState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Response, (StatusCode, String)> {
+    proxy_to_cp_raw(
+        &state,
+        reqwest::Method::POST,
+        "/register-with-key",
+        Some(body),
+    )
+    .await
+}
+
 // ── Core proxy function ───────────────────────────────────────────────────────
 
 /// Forward a request to the Control Plane, injecting the stored Bearer token.
@@ -264,6 +307,38 @@ async fn proxy_to_cp(
 
     let url = format!("{}{}", cp_url.trim_end_matches('/'), path);
     let mut req = state.http_client.request(method, &url).bearer_auth(&token);
+
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    convert_response(resp).await
+}
+
+/// Forward a request to the Control Plane WITHOUT Bearer token injection.
+///
+/// Used exclusively for `/register-with-key` (Setup Key is in the request body).
+/// Callers must NOT use this for any endpoint that requires CP authentication.
+async fn proxy_to_cp_raw(
+    state: &LocalApiState,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<Response, (StatusCode, String)> {
+    let cp_url = state.cp_url.read().await.clone().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cp_url not configured".into(),
+        )
+    })?;
+
+    let url = format!("{}{}", cp_url.trim_end_matches('/'), path);
+    let mut req = state.http_client.request(method, &url);
 
     if let Some(b) = body {
         req = req.json(&b);
@@ -631,6 +706,114 @@ mod tests {
 
         // State must remain Started.
         assert_eq!(*node_state.read().await, NodeState::Started);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── proxy_to_cp_raw: no Authorization header ─────────────────────────────
+
+    #[tokio::test]
+    async fn proxy_register_with_key_does_not_send_bearer() {
+        let dir = temp_mesh_dir("proxy-register-with-key");
+
+        // Mock CP for /register-with-key: verify no Authorization header is present.
+        let cp_base = mock_cp_server(
+            axum::routing::post(|headers: axum::http::HeaderMap| async move {
+                // Authorization header must be absent.
+                let has_auth = headers.get(axum::http::header::AUTHORIZATION).is_some();
+                assert!(
+                    !has_auth,
+                    "Authorization header must NOT be sent for /register-with-key"
+                );
+                (
+                    StatusCode::CREATED,
+                    Json(serde_json::json!({
+                        "agent_card": {},
+                        "api_token": "at_new_token"
+                    })),
+                )
+            }),
+            "/register-with-key",
+        )
+        .await;
+
+        // Token is set in state, but proxy_to_cp_raw must not forward it.
+        let state = make_state(
+            Some(cp_base),
+            Some("tok-should-not-forward".into()),
+            dir.clone(),
+        );
+        let app = router(state);
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "setup_key": "sk_test",
+            "agent_id": "agent-1",
+            "name": "Test Agent",
+            "capabilities": []
+        }))
+        .unwrap();
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/register-with-key")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+
+        let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_register_with_key_returns_503_without_cp_url() {
+        let dir = temp_mesh_dir("proxy-register-no-cp");
+        // No cp_url configured
+        let state = make_state(None, None, dir.clone());
+        let app = router(state);
+
+        let body = serde_json::to_vec(&serde_json::json!({"setup_key": "sk_x"})).unwrap();
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/register-with-key")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+
+        let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── setup-keys proxy ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn proxy_setup_keys_list_forwards_bearer() {
+        let dir = temp_mesh_dir("proxy-setup-keys-list");
+        let cp_base = mock_cp_server(
+            axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                let auth = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                assert_eq!(auth, "Bearer tok-test");
+                Json(serde_json::json!([{"id": "sk-1"}]))
+            }),
+            "/setup-keys",
+        )
+        .await;
+
+        let state = make_state(Some(cp_base), Some("tok-test".into()), dir.clone());
+        let app = router(state);
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/setup-keys")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

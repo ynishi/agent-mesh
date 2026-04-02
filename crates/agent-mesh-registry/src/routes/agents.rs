@@ -1,5 +1,5 @@
 use agent_mesh_core::agent_card::{AgentCard, AgentCardQuery, AgentCardRegistration, Capability};
-use agent_mesh_core::identity::{AgentCardId, AgentId};
+use agent_mesh_core::identity::{AgentCardId, AgentId, GroupId};
 use agent_mesh_core::user::ApiToken;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -44,9 +44,17 @@ pub async fn get_agent(
 
 pub async fn search_agents(
     State(state): State<AppState>,
-    AuthUser(_user_id): AuthUser,
-    Query(query): Query<AgentCardQuery>,
+    AuthUser(user_id): AuthUser,
+    Query(mut query): Query<AgentCardQuery>,
 ) -> Result<Json<Vec<AgentCard>>, (StatusCode, String)> {
+    // Group-scoped discovery: inject the user's group memberships.
+    let groups = state
+        .db
+        .list_groups_for_user(&user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let group_ids: Vec<GroupId> = groups.iter().map(|g| g.id).collect();
+    query.group_ids = Some(group_ids);
+
     let cards = state
         .db
         .search(&query)
@@ -190,4 +198,162 @@ pub async fn register_with_setup_key(
             api_token: raw_token,
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::hash_token;
+    use crate::{app, AppState};
+    use agent_mesh_core::identity::UserId;
+    use agent_mesh_core::user::{ApiToken, Group, GroupMember, GroupRole, User};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn make_db() -> Arc<crate::db::Database> {
+        Arc::new(crate::db::Database::open(":memory:").expect("in-memory db"))
+    }
+
+    fn make_app_state(db: Arc<crate::db::Database>) -> AppState {
+        AppState {
+            db,
+            oauth_config: None,
+            http_client: reqwest::Client::new(),
+        }
+    }
+
+    /// Create a user, group, member relationship and api_token in DB.
+    /// Returns (user_id, group_id, raw_token).
+    fn setup_user_group_token(
+        db: &Arc<crate::db::Database>,
+        external_id: &str,
+    ) -> (UserId, GroupId, String) {
+        let user = User {
+            id: UserId::new_v4(),
+            external_id: external_id.to_string(),
+            provider: "test".to_string(),
+            display_name: None,
+            created_at: chrono::Utc::now(),
+        };
+        db.create_user(&user).unwrap();
+
+        let group = Group {
+            id: GroupId::new_v4(),
+            name: format!("group-{external_id}"),
+            created_by: user.id,
+            created_at: chrono::Utc::now(),
+        };
+        db.create_group(&group).unwrap();
+        db.add_group_member(&GroupMember {
+            group_id: group.id,
+            user_id: user.id,
+            role: GroupRole::Owner,
+        })
+        .unwrap();
+
+        let raw_token = format!("at_{external_id}_token");
+        let token = ApiToken {
+            token_hash: hash_token(&raw_token),
+            user_id: user.id,
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+        };
+        db.create_api_token(&token).unwrap();
+
+        (user.id, group.id, raw_token)
+    }
+
+    #[tokio::test]
+    async fn search_agents_returns_only_own_group_agents() {
+        let db = make_db();
+        let (user1_id, group1_id, token1) = setup_user_group_token(&db, "user1");
+        let (user2_id, group2_id, _token2) = setup_user_group_token(&db, "user2");
+
+        // Register an agent for user1's group
+        let reg1 = AgentCardRegistration {
+            agent_id: AgentId::from_raw("agent-1".to_string()),
+            name: "Agent One".to_string(),
+            description: None,
+            capabilities: vec![],
+            metadata: None,
+        };
+        db.register(&reg1, user1_id, group1_id).unwrap();
+
+        // Register an agent for user2's group
+        let reg2 = AgentCardRegistration {
+            agent_id: AgentId::from_raw("agent-2".to_string()),
+            name: "Agent Two".to_string(),
+            description: None,
+            capabilities: vec![],
+            metadata: None,
+        };
+        db.register(&reg2, user2_id, group2_id).unwrap();
+
+        let app = app(make_app_state(db));
+
+        // user1 searches: should only see Agent One, not Agent Two
+        let req = Request::builder()
+            .method("GET")
+            .uri("/agents")
+            .header("authorization", format!("Bearer {token1}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let cards: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            cards.len(),
+            1,
+            "user1 should only see agents in their group"
+        );
+        assert_eq!(cards[0]["name"], "Agent One");
+    }
+
+    #[tokio::test]
+    async fn search_agents_excludes_other_group_agents() {
+        let db = make_db();
+        let (_user1_id, group1_id, token1) = setup_user_group_token(&db, "exc-user1");
+        let (user2_id, group2_id, _token2) = setup_user_group_token(&db, "exc-user2");
+
+        // user2 registers an agent
+        let reg2 = AgentCardRegistration {
+            agent_id: AgentId::from_raw("agent-x".to_string()),
+            name: "Agent X".to_string(),
+            description: None,
+            capabilities: vec![],
+            metadata: None,
+        };
+        db.register(&reg2, user2_id, group2_id).unwrap();
+
+        let app = app(make_app_state(db));
+
+        // user1 searches: should see 0 agents (only has group1, and no agents in group1)
+        let req = Request::builder()
+            .method("GET")
+            .uri("/agents")
+            .header("authorization", format!("Bearer {token1}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let cards: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(
+            cards.is_empty(),
+            "user1 must not see agents from group2: {cards:?}"
+        );
+
+        // Suppress unused variable warning
+        let _ = group1_id;
+    }
 }

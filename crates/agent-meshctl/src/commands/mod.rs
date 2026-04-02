@@ -5,6 +5,7 @@ pub mod login;
 pub mod register;
 pub mod request;
 pub mod revoke;
+pub mod setup_key;
 pub mod status;
 
 pub use self::discover::discover;
@@ -14,6 +15,7 @@ pub use self::login::login;
 pub use self::register::register;
 pub use self::request::request;
 pub use self::revoke::revoke;
+pub use self::setup_key::{setup_key_create, setup_key_list, setup_key_revoke};
 pub use self::status::status;
 
 use agent_mesh_core::acl::AclRule;
