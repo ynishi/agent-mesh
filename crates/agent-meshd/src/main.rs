@@ -26,6 +26,10 @@ struct Cli {
     /// ACL policy file (JSON).
     #[arg(long)]
     acl: Option<String>,
+
+    /// Control Plane URL (e.g., "http://localhost:9801").
+    #[arg(long)]
+    cp_url: Option<String>,
 }
 
 #[tokio::main]
@@ -43,6 +47,7 @@ async fn main() -> Result<()> {
             .as_deref()
             .or(std::env::var("MESH_SECRET_KEY").ok().as_deref()),
         cli.acl.as_deref(),
+        cli.cp_url.as_deref(),
     )?;
 
     if cfg.relay_url.is_empty() {

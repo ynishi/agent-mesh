@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_mesh_core::identity::{AgentKeypair, MessageId};
@@ -9,10 +10,11 @@ use agent_mesh_core::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
 use anyhow::Result;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use futures_util::SinkExt;
+use serde::Serialize;
 use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::config::NodeConfig;
+use crate::config::{MeshCredentials, NodeConfig};
 use crate::proxy;
 
 type WsStream =
@@ -26,6 +28,18 @@ enum PeerNoise {
     Established(NoiseTransport),
 }
 
+/// meshd daemon state machine.
+///
+/// Phase 1: `Started` → `Authenticated`
+/// Phase 3 (future): → `Syncing` → `Connected`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum NodeState {
+    /// Local API running, no authentication token.
+    Started,
+    /// Token acquired, CP operations available.
+    Authenticated,
+}
+
 pub struct MeshNode {
     keypair: AgentKeypair,
     noise_keypair: NoiseKeypair,
@@ -33,6 +47,14 @@ pub struct MeshNode {
     local_agent_url: String,
     acl: Arc<RwLock<agent_mesh_core::acl::AclPolicy>>,
     config_path: Option<String>,
+    /// Control Plane URL.
+    cp_url: Option<String>,
+    /// Current daemon state.
+    state: Arc<RwLock<NodeState>>,
+    /// Bearer token for CP authentication.
+    bearer_token: Arc<RwLock<Option<String>>>,
+    /// Directory used for credential storage (typically `~/.mesh/`).
+    mesh_dir: PathBuf,
 }
 
 impl MeshNode {
@@ -41,6 +63,19 @@ impl MeshNode {
         let noise_keypair =
             NoiseKeypair::generate().map_err(|e| anyhow::anyhow!("noise keygen: {e}"))?;
         let config_path = config.config_path.clone();
+
+        let mesh_dir = MeshCredentials::default_mesh_dir()?;
+        let creds = MeshCredentials::load(&mesh_dir).unwrap_or_default();
+
+        // Merge: cp_url from CLI/config takes precedence over stored credentials.
+        let cp_url = config.cp_url.clone().or_else(|| creds.cp_url.clone());
+
+        let initial_state = if creds.bearer_token.is_some() {
+            NodeState::Authenticated
+        } else {
+            NodeState::Started
+        };
+
         Ok(Self {
             keypair,
             noise_keypair,
@@ -48,8 +83,36 @@ impl MeshNode {
             local_agent_url: config.local_agent_url,
             acl: Arc::new(RwLock::new(config.acl)),
             config_path,
+            cp_url,
+            state: Arc::new(RwLock::new(initial_state)),
+            bearer_token: Arc::new(RwLock::new(creds.bearer_token)),
+            mesh_dir,
         })
     }
+
+    // ── Accessors used by Subtask 2 (local_api.rs) ──────────────────────────
+
+    /// Returns a shared reference to the daemon state.
+    pub fn state(&self) -> Arc<RwLock<NodeState>> {
+        Arc::clone(&self.state)
+    }
+
+    /// Returns a shared reference to the bearer token.
+    pub fn bearer_token(&self) -> Arc<RwLock<Option<String>>> {
+        Arc::clone(&self.bearer_token)
+    }
+
+    /// Returns the Control Plane URL, if configured.
+    pub fn cp_url(&self) -> Option<&str> {
+        self.cp_url.as_deref()
+    }
+
+    /// Returns the mesh credentials directory (typically `~/.mesh/`).
+    pub fn mesh_dir(&self) -> &Path {
+        &self.mesh_dir
+    }
+
+    // ── Internal helpers ─────────────────────────────────────────────────────
 
     /// Start SIGHUP listener for ACL hot reload.
     pub fn start_acl_reload_listener(&self) {
@@ -387,5 +450,108 @@ impl MeshNode {
         let json = serde_json::to_string(&response)?;
         sink.send(Message::text(json)).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_mesh_core::identity::AgentKeypair;
+
+    /// Creates a unique temp directory for each test (no external deps).
+    fn temp_mesh_dir(suffix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("meshd-node-test-{suffix}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_config(secret: &str, cp_url: Option<&str>) -> NodeConfig {
+        NodeConfig {
+            secret_key_hex: secret.to_string(),
+            relay_url: String::new(),
+            local_agent_url: String::new(),
+            acl: agent_mesh_core::acl::AclPolicy::default(),
+            config_path: None,
+            cp_url: cp_url.map(str::to_string),
+            bearer_token: None,
+        }
+    }
+
+    /// Creates a MeshNode with a caller-supplied mesh_dir, bypassing HOME lookup.
+    fn node_with_mesh_dir(cfg: NodeConfig, mesh_dir: &Path) -> Result<MeshNode> {
+        let keypair = cfg.keypair()?;
+        let noise_keypair =
+            NoiseKeypair::generate().map_err(|e| anyhow::anyhow!("noise keygen: {e}"))?;
+        let config_path = cfg.config_path.clone();
+        let creds = MeshCredentials::load(mesh_dir).unwrap_or_default();
+        let cp_url = cfg.cp_url.clone().or_else(|| creds.cp_url.clone());
+        let initial_state = if creds.bearer_token.is_some() {
+            NodeState::Authenticated
+        } else {
+            NodeState::Started
+        };
+        Ok(MeshNode {
+            keypair,
+            noise_keypair,
+            relay_url: cfg.relay_url,
+            local_agent_url: cfg.local_agent_url,
+            acl: Arc::new(RwLock::new(cfg.acl)),
+            config_path,
+            cp_url,
+            state: Arc::new(RwLock::new(initial_state)),
+            bearer_token: Arc::new(RwLock::new(creds.bearer_token)),
+            mesh_dir: mesh_dir.to_path_buf(),
+        })
+    }
+
+    #[tokio::test]
+    async fn initial_state_without_token_is_started() {
+        let kp = AgentKeypair::generate();
+        let dir = temp_mesh_dir("no-token");
+        let cfg = make_config(&hex::encode(kp.secret_bytes()), None);
+        let node = node_with_mesh_dir(cfg, &dir).unwrap();
+
+        let state = node.state().read().await.clone();
+        assert_eq!(state, NodeState::Started);
+        assert!(node.bearer_token().read().await.is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn initial_state_with_token_is_authenticated() {
+        let kp = AgentKeypair::generate();
+        let dir = temp_mesh_dir("with-token");
+
+        let creds = MeshCredentials {
+            bearer_token: Some("tok-xyz".into()),
+            cp_url: None,
+        };
+        creds.save(&dir).unwrap();
+
+        let cfg = make_config(&hex::encode(kp.secret_bytes()), None);
+        let node = node_with_mesh_dir(cfg, &dir).unwrap();
+
+        let state = node.state().read().await.clone();
+        assert_eq!(state, NodeState::Authenticated);
+        assert_eq!(node.bearer_token().read().await.as_deref(), Some("tok-xyz"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cp_url_from_config_is_accessible() {
+        let kp = AgentKeypair::generate();
+        let dir = temp_mesh_dir("cp-url");
+        let cfg = make_config(
+            &hex::encode(kp.secret_bytes()),
+            Some("http://cp.example.com"),
+        );
+        let node = node_with_mesh_dir(cfg, &dir).unwrap();
+
+        assert_eq!(node.cp_url(), Some("http://cp.example.com"));
+        assert_eq!(node.mesh_dir(), dir.as_path());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

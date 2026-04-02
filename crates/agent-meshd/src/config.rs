@@ -2,6 +2,7 @@ use agent_mesh_core::acl::AclPolicy;
 use agent_mesh_core::identity::AgentKeypair;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// Configuration for a mesh node daemon.
 #[derive(Debug, Serialize, Deserialize)]
@@ -18,6 +19,12 @@ pub struct NodeConfig {
     /// Path to the config file (set internally for hot reload).
     #[serde(skip)]
     pub config_path: Option<String>,
+    /// Control Plane URL (e.g., "http://localhost:9801").
+    #[serde(default)]
+    pub cp_url: Option<String>,
+    /// Bearer token for CP authentication (loaded from ~/.mesh/config.toml).
+    #[serde(skip)]
+    pub bearer_token: Option<String>,
 }
 
 impl NodeConfig {
@@ -38,6 +45,7 @@ impl NodeConfig {
         local_agent: Option<&str>,
         secret_key: Option<&str>,
         acl_path: Option<&str>,
+        cp_url: Option<&str>,
     ) -> Result<Self> {
         let mut cfg = if let Some(path) = config_path {
             Self::load(path)?
@@ -48,6 +56,8 @@ impl NodeConfig {
                 local_agent_url: String::new(),
                 acl: AclPolicy::default(),
                 config_path: None,
+                cp_url: None,
+                bearer_token: None,
             }
         };
 
@@ -64,6 +74,9 @@ impl NodeConfig {
             let content = std::fs::read_to_string(acl_path)
                 .with_context(|| format!("failed to read ACL file: {acl_path}"))?;
             cfg.acl = serde_json::from_str(&content).with_context(|| "failed to parse ACL file")?;
+        }
+        if let Some(url) = cp_url {
+            cfg.cp_url = Some(url.to_string());
         }
 
         Ok(cfg)
@@ -94,6 +107,57 @@ impl NodeConfig {
     }
 }
 
+/// Credentials stored in `~/.mesh/config.toml`.
+///
+/// Separated from `NodeConfig` (JSON) so the bearer token is never written to the
+/// node config file.
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct MeshCredentials {
+    pub bearer_token: Option<String>,
+    pub cp_url: Option<String>,
+}
+
+impl MeshCredentials {
+    /// Load from `<mesh_dir>/config.toml`.  Returns `Default` when the file does not exist.
+    pub fn load(mesh_dir: &Path) -> Result<Self> {
+        let path = mesh_dir.join("config.toml");
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let creds: Self =
+            toml::from_str(&content).with_context(|| "failed to parse ~/.mesh/config.toml")?;
+        Ok(creds)
+    }
+
+    /// Save to `<mesh_dir>/config.toml`, creating the directory if needed.
+    /// Sets 0600 permissions on Unix so only the owner can read the token.
+    pub fn save(&self, mesh_dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(mesh_dir)
+            .with_context(|| format!("failed to create dir {}", mesh_dir.display()))?;
+        let path = mesh_dir.join("config.toml");
+        let content = toml::to_string(self).with_context(|| "failed to serialize credentials")?;
+        std::fs::write(&path, content)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+        }
+
+        Ok(())
+    }
+
+    /// Returns the default `~/.mesh/` directory path.
+    pub fn default_mesh_dir() -> Result<PathBuf> {
+        let home = std::env::var("HOME").context("HOME environment variable not set")?;
+        Ok(PathBuf::from(home).join(".mesh"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +176,7 @@ mod tests {
             Some("http://localhost:8080"),
             Some(&secret),
             None,
+            None,
         )
         .unwrap();
 
@@ -123,10 +188,17 @@ mod tests {
 
     #[test]
     fn from_cli_defaults_are_empty() {
-        let cfg = NodeConfig::from_cli(None, None, None, None, None).unwrap();
+        let cfg = NodeConfig::from_cli(None, None, None, None, None, None).unwrap();
         assert!(cfg.relay_url.is_empty());
         assert!(cfg.local_agent_url.is_empty());
         assert!(cfg.secret_key_hex.is_empty());
+    }
+
+    #[test]
+    fn from_cli_cp_url() {
+        let cfg = NodeConfig::from_cli(None, None, None, None, None, Some("http://cp.example.com"))
+            .unwrap();
+        assert_eq!(cfg.cp_url.as_deref(), Some("http://cp.example.com"));
     }
 
     #[test]
@@ -138,6 +210,8 @@ mod tests {
             local_agent_url: String::new(),
             acl: AclPolicy::default(),
             config_path: None,
+            cp_url: None,
+            bearer_token: None,
         };
         let kp = cfg.keypair().unwrap();
         assert!(!kp.agent_id().as_str().is_empty());
@@ -151,6 +225,8 @@ mod tests {
             local_agent_url: String::new(),
             acl: AclPolicy::default(),
             config_path: None,
+            cp_url: None,
+            bearer_token: None,
         };
         assert!(cfg.keypair().is_err());
     }
@@ -163,6 +239,8 @@ mod tests {
             local_agent_url: String::new(),
             acl: AclPolicy::default(),
             config_path: None,
+            cp_url: None,
+            bearer_token: None,
         };
         assert!(cfg.keypair().is_err());
     }
@@ -176,6 +254,8 @@ mod tests {
             local_agent_url: String::new(),
             acl: AclPolicy::default(),
             config_path: None,
+            cp_url: None,
+            bearer_token: None,
         };
         let display = cfg.agent_id_display();
         assert_ne!(display, "<invalid key>");
@@ -190,6 +270,8 @@ mod tests {
             local_agent_url: String::new(),
             acl: AclPolicy::default(),
             config_path: None,
+            cp_url: None,
+            bearer_token: None,
         };
         assert_eq!(cfg.agent_id_display(), "<invalid key>");
     }
@@ -236,6 +318,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -245,5 +328,65 @@ mod tests {
         assert_eq!(cfg.local_agent_url, "http://file:8080");
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // MeshCredentials tests
+
+    #[test]
+    fn mesh_credentials_load_missing_file() {
+        let dir = std::env::temp_dir().join("meshd-test-creds-missing");
+        // Ensure the dir does not contain config.toml
+        let _ = std::fs::remove_file(dir.join("config.toml"));
+        let creds = MeshCredentials::load(&dir).unwrap();
+        assert!(creds.bearer_token.is_none());
+        assert!(creds.cp_url.is_none());
+    }
+
+    #[test]
+    fn mesh_credentials_save_load_roundtrip() {
+        let dir = std::env::temp_dir().join("meshd-test-creds-roundtrip");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let creds = MeshCredentials {
+            bearer_token: Some("tok-abc123".into()),
+            cp_url: Some("http://cp.local:9801".into()),
+        };
+        creds.save(&dir).unwrap();
+
+        let loaded = MeshCredentials::load(&dir).unwrap();
+        assert_eq!(loaded.bearer_token.as_deref(), Some("tok-abc123"));
+        assert_eq!(loaded.cp_url.as_deref(), Some("http://cp.local:9801"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mesh_credentials_save_sets_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("meshd-test-creds-perms");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let creds = MeshCredentials {
+            bearer_token: Some("tok-secret".into()),
+            cp_url: None,
+        };
+        creds.save(&dir).unwrap();
+
+        let meta = std::fs::metadata(dir.join("config.toml")).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600 but got {mode:o}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mesh_credentials_default_mesh_dir() {
+        // HOME must be set in test environment.
+        if std::env::var("HOME").is_ok() {
+            let dir = MeshCredentials::default_mesh_dir().unwrap();
+            assert!(dir.ends_with(".mesh"));
+        }
     }
 }
