@@ -34,8 +34,5 @@ http-body-util = "0.1"
 bytes = "1"
 
 [dev-dependencies]
-agent-mesh-relay = { workspace = true }
-agent-mesh-registry = { workspace = true }
 axum = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
+tempfile = "3"

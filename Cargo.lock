@@ -127,14 +127,11 @@ name = "agent-meshctl"
 version = "0.1.0"
 dependencies = [
  "agent-mesh-core",
- "agent-mesh-registry",
- "agent-mesh-relay",
  "agent-mesh-sdk",
  "anyhow",
  "axum",
  "base64",
  "bytes",
- "chrono",
  "clap",
  "ed25519-dalek",
  "hex",
@@ -145,10 +142,10 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

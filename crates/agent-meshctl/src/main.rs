@@ -1,11 +1,16 @@
-use agent_meshctl::commands;
+use agent_meshctl::{commands, daemon};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(name = "meshctl", about = "Agent mesh control CLI")]
 struct Cli {
+    /// meshd socket path (default: ~/.mesh/meshd.sock)
+    #[arg(long)]
+    meshd: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -14,11 +19,14 @@ struct Cli {
 enum Commands {
     /// Generate a new agent keypair.
     Keygen,
+    /// Log in to the control plane via OAuth Device Flow.
+    Login {
+        /// Control plane URL.
+        #[arg(long)]
+        cp_url: String,
+    },
     /// Register an agent card with the registry.
     Register {
-        /// Registry server URL.
-        #[arg(long, default_value = "http://localhost:9801")]
-        registry: String,
         /// Agent name.
         #[arg(long)]
         name: String,
@@ -34,9 +42,6 @@ enum Commands {
     },
     /// Search for agents in the registry.
     Discover {
-        /// Registry server URL.
-        #[arg(long, default_value = "http://localhost:9801")]
-        registry: String,
         /// Filter by capability name.
         #[arg(long)]
         capability: Option<String>,
@@ -65,23 +70,21 @@ enum Commands {
         #[arg(long, default_value = "30")]
         timeout: u64,
     },
-    /// Show relay status (connected agents, buffers, revocations).
-    Status {
-        /// Relay server HTTP URL.
-        #[arg(long, default_value = "http://localhost:9800")]
-        relay: String,
-    },
+    /// Show meshd connection status.
+    Status,
     /// Revoke an agent's key. The agent will be disconnected and blocked.
     Revoke {
-        /// Relay server HTTP URL.
-        #[arg(long, default_value = "http://localhost:9800")]
-        relay: String,
         /// Reason for revocation.
         #[arg(long)]
         reason: Option<String>,
         /// Secret key hex (or reads from MESH_SECRET_KEY env).
         #[arg(long)]
         secret_key: Option<String>,
+    },
+    /// Manage agent groups.
+    Group {
+        #[command(subcommand)]
+        subcommand: GroupCommands,
     },
     /// Add an ACL rule (outputs JSON to stdout for inclusion in meshd config).
     Acl {
@@ -97,6 +100,36 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum GroupCommands {
+    /// Create a new group.
+    Create {
+        /// Group name.
+        #[arg(long)]
+        name: String,
+    },
+    /// List all groups.
+    List,
+    /// Add a member to a group.
+    AddMember {
+        /// Group ID.
+        #[arg(long)]
+        group_id: String,
+        /// User ID to add.
+        #[arg(long)]
+        user_id: String,
+    },
+    /// Remove a member from a group.
+    RemoveMember {
+        /// Group ID.
+        #[arg(long)]
+        group_id: String,
+        /// User ID to remove.
+        #[arg(long)]
+        user_id: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -104,29 +137,10 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let sock_path = cli.meshd.map(PathBuf::from);
+
     match cli.command {
         Commands::Keygen => commands::keygen(),
-        Commands::Register {
-            registry,
-            name,
-            description,
-            capabilities,
-            secret_key,
-        } => {
-            commands::register(
-                &registry,
-                &name,
-                description.as_deref(),
-                &capabilities,
-                secret_key.as_deref(),
-            )
-            .await
-        }
-        Commands::Discover {
-            registry,
-            capability,
-            search,
-        } => commands::discover(&registry, capability.as_deref(), search.as_deref()).await,
         Commands::Request {
             relay,
             target,
@@ -145,16 +159,52 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Commands::Status { relay } => commands::status(&relay).await,
-        Commands::Revoke {
-            relay,
-            reason,
-            secret_key,
-        } => commands::revoke(&relay, reason.as_deref(), secret_key.as_deref()).await,
         Commands::Acl {
             source,
             target,
             allow,
         } => commands::acl(&source, &target, &allow),
+        _ => {
+            let client = daemon::ensure_meshd(sock_path).await?;
+            match cli.command {
+                Commands::Login { cp_url } => commands::login(&client, &cp_url).await,
+                Commands::Register {
+                    name,
+                    description,
+                    capabilities,
+                    secret_key,
+                } => {
+                    commands::register(
+                        &client,
+                        &name,
+                        description.as_deref(),
+                        &capabilities,
+                        secret_key.as_deref(),
+                    )
+                    .await
+                }
+                Commands::Discover { capability, search } => {
+                    commands::discover(&client, capability.as_deref(), search.as_deref()).await
+                }
+                Commands::Status => commands::status(&client).await,
+                Commands::Revoke { reason, secret_key } => {
+                    commands::revoke(&client, reason.as_deref(), secret_key.as_deref()).await
+                }
+                Commands::Group { subcommand } => match subcommand {
+                    GroupCommands::Create { name } => commands::group_create(&client, &name).await,
+                    GroupCommands::List => commands::group_list(&client).await,
+                    GroupCommands::AddMember { group_id, user_id } => {
+                        commands::group_add_member(&client, &group_id, &user_id).await
+                    }
+                    GroupCommands::RemoveMember { group_id, user_id } => {
+                        commands::group_remove_member(&client, &group_id, &user_id).await
+                    }
+                },
+                // Already handled above
+                Commands::Keygen | Commands::Request { .. } | Commands::Acl { .. } => {
+                    unreachable!()
+                }
+            }
+        }
     }
 }
