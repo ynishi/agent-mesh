@@ -45,6 +45,7 @@ pub fn router(state: LocalApiState) -> Router {
             "/groups/{id}/members/{user_id}",
             delete(proxy_groups_remove_member),
         )
+        .route("/revocations", post(proxy_revocations_create))
         .with_state(state)
 }
 
@@ -227,6 +228,13 @@ async fn proxy_groups_remove_member(
         None,
     )
     .await
+}
+
+async fn proxy_revocations_create(
+    State(state): State<LocalApiState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Response, (StatusCode, String)> {
+    proxy_to_cp(&state, reqwest::Method::POST, "/revocations", Some(body)).await
 }
 
 // ── Core proxy function ───────────────────────────────────────────────────────

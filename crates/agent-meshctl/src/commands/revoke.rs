@@ -48,7 +48,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Subtask 3: /revocations endpoint in meshd"]
     async fn revoke_success() {
         let router = Router::new().route(
             "/revocations",
