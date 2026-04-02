@@ -64,6 +64,13 @@ pub fn app(state: AppState) -> Router {
         .route("/agents/{id}", put(routes::agents::update_agent))
         .route("/agents/{id}", delete(routes::agents::delete_agent))
         .route("/users/me", get(routes::users::get_me))
+        .route("/groups", post(routes::groups::create_group))
+        .route("/groups", get(routes::groups::list_groups))
+        .route("/groups/{id}/members", post(routes::groups::add_member))
+        .route(
+            "/groups/{id}/members/{user_id}",
+            delete(routes::groups::remove_member),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

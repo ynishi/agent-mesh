@@ -412,6 +412,34 @@ impl Database {
         )?;
         Ok(())
     }
+
+    /// Get a specific group member's role, returning `None` if not a member.
+    pub fn get_group_member(
+        &self,
+        group_id: &GroupId,
+        user_id: &UserId,
+    ) -> Result<Option<GroupMember>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT group_id, user_id, role
+             FROM group_members
+             WHERE group_id = ?1 AND user_id = ?2",
+        )?;
+        let mut rows = stmt.query(params![group_id.0.to_string(), user_id.0.to_string(),])?;
+        match rows.next()? {
+            Some(row) => {
+                let gid_str: String = row.get(0)?;
+                let uid_str: String = row.get(1)?;
+                let role_str: String = row.get(2)?;
+                Ok(Some(GroupMember {
+                    group_id: GroupId::parse_str(&gid_str)?,
+                    user_id: UserId::parse_str(&uid_str)?,
+                    role: str_to_group_role(&role_str)?,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 fn row_to_user(row: &rusqlite::Row) -> Result<User> {
@@ -447,6 +475,15 @@ fn group_role_to_str(role: &GroupRole) -> &'static str {
         GroupRole::Owner => "owner",
         GroupRole::Admin => "admin",
         GroupRole::Member => "member",
+    }
+}
+
+fn str_to_group_role(s: &str) -> Result<GroupRole> {
+    match s {
+        "owner" => Ok(GroupRole::Owner),
+        "admin" => Ok(GroupRole::Admin),
+        "member" => Ok(GroupRole::Member),
+        other => Err(anyhow::anyhow!("unknown group role: {other}")),
     }
 }
 
