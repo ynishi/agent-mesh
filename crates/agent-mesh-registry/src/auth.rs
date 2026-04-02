@@ -99,7 +99,11 @@ mod tests {
 
     fn test_state() -> AppState {
         let db = Database::open(":memory:").expect("in-memory db");
-        AppState { db: Arc::new(db) }
+        AppState {
+            db: Arc::new(db),
+            oauth_config: None,
+            http_client: reqwest::Client::new(),
+        }
     }
 
     fn make_test_user(state: &AppState) -> agent_mesh_core::user::User {

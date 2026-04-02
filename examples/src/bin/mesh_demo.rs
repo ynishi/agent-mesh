@@ -168,7 +168,11 @@ async fn start_relay() -> Result<SocketAddr> {
 /// Start the registry using the real agent-mesh-registry crate.
 async fn start_registry() -> Result<SocketAddr> {
     let db = Arc::new(agent_mesh_registry::db::Database::open(":memory:")?);
-    let state = agent_mesh_registry::AppState { db };
+    let state = agent_mesh_registry::AppState {
+        db,
+        oauth_config: None,
+        http_client: reqwest::Client::new(),
+    };
     let app = agent_mesh_registry::app(state);
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;

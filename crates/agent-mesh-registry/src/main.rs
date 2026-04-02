@@ -1,6 +1,6 @@
 use agent_mesh_registry::db::Database;
-use agent_mesh_registry::AppState;
-use anyhow::Result;
+use agent_mesh_registry::{AppState, OAuthConfig};
+use anyhow::{bail, Result};
 use clap::Parser;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
@@ -16,6 +16,18 @@ struct Cli {
     /// SQLite database path. Env: REGISTRY_DB
     #[arg(short, long, default_value = "registry.db")]
     db: String,
+
+    /// OAuth provider (e.g. "github"). If not set, OAuth endpoints are disabled.
+    #[arg(long)]
+    oauth_provider: Option<String>,
+
+    /// OAuth client ID
+    #[arg(long)]
+    oauth_client_id: Option<String>,
+
+    /// OAuth client secret
+    #[arg(long)]
+    oauth_client_secret: Option<String>,
 }
 
 #[tokio::main]
@@ -39,8 +51,29 @@ async fn main() -> Result<()> {
         std::env::var("REGISTRY_ADDR").unwrap_or(cli.listen)
     };
 
+    // Build OAuthConfig only when all three args are provided.
+    let oauth_config =
+        match (
+            cli.oauth_provider,
+            cli.oauth_client_id,
+            cli.oauth_client_secret,
+        ) {
+            (Some(provider), Some(client_id), Some(client_secret)) => Some(
+                OAuthConfig::from_provider(provider, client_id, client_secret)?,
+            ),
+            (None, None, None) => None,
+            _ => bail!(
+                "OAuth configuration is incomplete: --oauth-provider, --oauth-client-id, \
+             and --oauth-client-secret must all be provided together"
+            ),
+        };
+
     let db = Arc::new(Database::open(&db_path)?);
-    let state = AppState { db };
+    let state = AppState {
+        db,
+        oauth_config,
+        http_client: reqwest::Client::new(),
+    };
 
     let app = agent_mesh_registry::app(state).layer(TraceLayer::new_for_http());
 
