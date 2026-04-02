@@ -51,6 +51,13 @@ pub struct AppState {
 }
 
 /// Build the registry router with the given state.
+///
+/// The router is organized into three layers:
+/// - `public`: no authentication required (health, oauth)
+/// - `authed`: requires Bearer token via `require_auth` middleware
+/// - `setup_key_routes`: Setup Key endpoints — `/register-with-key` verifies
+///   the Setup Key directly inside the handler (architecture.md §11.1,
+///   BP: Tailscale/NetBird). No auth middleware is applied here intentionally.
 pub fn app(state: AppState) -> Router {
     let public = Router::new()
         .route("/health", get(health))
@@ -71,12 +78,30 @@ pub fn app(state: AppState) -> Router {
             "/groups/{id}/members/{user_id}",
             delete(routes::groups::remove_member),
         )
+        .route(
+            "/setup-keys",
+            post(routes::setup_keys::create_setup_key).get(routes::setup_keys::list_setup_keys),
+        )
+        .route(
+            "/setup-keys/{id}",
+            delete(routes::setup_keys::revoke_setup_key),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
         ));
 
-    public.merge(authed).with_state(state)
+    // Setup Key registration endpoint: no Bearer auth middleware.
+    // The handler verifies the Setup Key directly (architecture.md §11.1).
+    let setup_key_routes = Router::new().route(
+        "/register-with-key",
+        post(routes::agents::register_with_setup_key),
+    );
+
+    public
+        .merge(authed)
+        .merge(setup_key_routes)
+        .with_state(state)
 }
 
 async fn health() -> &'static str {

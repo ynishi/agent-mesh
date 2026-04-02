@@ -1,9 +1,12 @@
 use agent_mesh_core::agent_card::{AgentCard, AgentCardQuery, AgentCardRegistration};
 use agent_mesh_core::identity::{AgentCardId, AgentId, GroupId, UserId};
-use agent_mesh_core::user::{ApiToken, Group, GroupMember, GroupRole, User};
+use agent_mesh_core::user::{
+    ApiToken, Group, GroupMember, GroupRole, SetupKey, SetupKeyUsage, User,
+};
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::sync::Mutex;
+use uuid::Uuid;
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -65,6 +68,18 @@ impl Database {
                 expires_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
+
+            CREATE TABLE IF NOT EXISTS setup_keys (
+                id TEXT PRIMARY KEY,
+                key_hash TEXT NOT NULL,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                group_id TEXT NOT NULL REFERENCES groups(id),
+                usage TEXT NOT NULL DEFAULT 'one_off',
+                uses_remaining INTEGER,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_setup_keys_hash ON setup_keys(key_hash);
             ",
         )?;
 
@@ -440,6 +455,168 @@ impl Database {
             None => Ok(None),
         }
     }
+
+    // ── SetupKey methods ──────────────────────────────────────────────────────
+
+    pub fn create_setup_key(&self, key: &SetupKey) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let usage_str = usage_to_db_str(&key.usage);
+        conn.execute(
+            "INSERT INTO setup_keys (id, key_hash, user_id, group_id, usage, uses_remaining, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                key.id.to_string(),
+                key.key_hash,
+                key.user_id.0.to_string(),
+                key.group_id.0.to_string(),
+                usage_str,
+                key.uses_remaining.map(|n| n as i64),
+                key.created_at.to_rfc3339(),
+                key.expires_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Verify a setup key by its pre-hashed value.
+    ///
+    /// Checks expiry and remaining uses atomically. On success:
+    /// - OneOff key: sets `uses_remaining = 0` (marks as consumed; physical row kept for audit)
+    /// - Reusable key: decrements `uses_remaining` by 1
+    ///
+    /// Returns `Some(SetupKey)` if valid and available, `None` otherwise.
+    pub fn verify_setup_key(&self, key_hash: &str) -> Result<Option<SetupKey>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let tx = conn.unchecked_transaction()?;
+
+        type SetupKeyRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<i64>,
+            String,
+            String,
+        );
+        let result: Option<SetupKeyRow> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, key_hash, user_id, group_id, usage, uses_remaining, created_at, expires_at
+                 FROM setup_keys WHERE key_hash = ?1",
+            )?;
+            let mut rows = stmt.query(params![key_hash])?;
+            match rows.next()? {
+                None => None,
+                Some(row) => Some((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                )),
+            }
+        };
+
+        let (id_str, kh, uid_str, gid_str, usage_str, uses_remaining_raw, created_str, expires_str) =
+            match result {
+                None => {
+                    tx.rollback()?;
+                    return Ok(None);
+                }
+                Some(r) => r,
+            };
+
+        // Expiry check
+        let expires_at = chrono::DateTime::parse_from_rfc3339(&expires_str)?.to_utc();
+        if expires_at < chrono::Utc::now() {
+            tx.rollback()?;
+            return Ok(None);
+        }
+
+        // Usage check and decrement
+        let usage = db_str_to_usage(&usage_str, uses_remaining_raw)?;
+        match &usage {
+            SetupKeyUsage::OneOff => {
+                // uses_remaining == None means unused; 0 means already used
+                if uses_remaining_raw == Some(0) {
+                    tx.rollback()?;
+                    return Ok(None);
+                }
+                // Mark as consumed: set uses_remaining = 0
+                tx.execute(
+                    "UPDATE setup_keys SET uses_remaining = 0 WHERE key_hash = ?1",
+                    params![key_hash],
+                )?;
+            }
+            SetupKeyUsage::Reusable { .. } => match uses_remaining_raw {
+                None | Some(0) => {
+                    tx.rollback()?;
+                    return Ok(None);
+                }
+                Some(n) => {
+                    tx.execute(
+                        "UPDATE setup_keys SET uses_remaining = ?1 WHERE key_hash = ?2",
+                        params![n - 1, key_hash],
+                    )?;
+                }
+            },
+        }
+
+        tx.commit()?;
+
+        let id = Uuid::parse_str(&id_str)?;
+        let user_id = UserId::parse_str(&uid_str)?;
+        let group_id = GroupId::parse_str(&gid_str)?;
+        let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)?.to_utc();
+
+        // Reflect the updated uses_remaining in the returned key
+        let new_uses_remaining = match &usage {
+            SetupKeyUsage::OneOff => None,
+            SetupKeyUsage::Reusable { .. } => uses_remaining_raw.map(|n| (n - 1) as u32),
+        };
+
+        Ok(Some(SetupKey {
+            id,
+            key_hash: kh,
+            user_id,
+            group_id,
+            usage,
+            uses_remaining: new_uses_remaining,
+            created_at,
+            expires_at,
+        }))
+    }
+
+    pub fn list_setup_keys(&self, user_id: &UserId) -> Result<Vec<SetupKey>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, key_hash, user_id, group_id, usage, uses_remaining, created_at, expires_at
+             FROM setup_keys WHERE user_id = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let mut rows = stmt.query(params![user_id.0.to_string()])?;
+        let mut keys = Vec::new();
+        while let Some(row) = rows.next()? {
+            keys.push(row_to_setup_key(row)?);
+        }
+        Ok(keys)
+    }
+
+    /// Revoke (physically delete) a setup key by id, only if owned by the given user.
+    ///
+    /// Returns `true` if deleted, `false` if not found or not owned by user.
+    pub fn revoke_setup_key(&self, id: &Uuid, user_id: &UserId) -> Result<bool> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let affected = conn.execute(
+            "DELETE FROM setup_keys WHERE id = ?1 AND user_id = ?2",
+            params![id.to_string(), user_id.0.to_string()],
+        )?;
+        Ok(affected > 0)
+    }
 }
 
 fn row_to_user(row: &rusqlite::Row) -> Result<User> {
@@ -485,6 +662,70 @@ fn str_to_group_role(s: &str) -> Result<GroupRole> {
         "member" => Ok(GroupRole::Member),
         other => Err(anyhow::anyhow!("unknown group role: {other}")),
     }
+}
+
+/// Serialize `SetupKeyUsage` to a DB string.
+///
+/// - `OneOff` → `"one_off"`
+/// - `Reusable { max_uses }` → `{"reusable": N}` (JSON)
+fn usage_to_db_str(usage: &SetupKeyUsage) -> String {
+    match usage {
+        SetupKeyUsage::OneOff => "one_off".to_string(),
+        SetupKeyUsage::Reusable { max_uses } => {
+            format!(r#"{{"reusable":{}}}"#, max_uses)
+        }
+    }
+}
+
+/// Deserialize a DB string back into `SetupKeyUsage`.
+///
+/// `uses_remaining_raw` is the raw DB value; for Reusable keys, `max_uses`
+/// is recovered from the `usage` JSON because the DDL has no separate column.
+fn db_str_to_usage(usage_str: &str, uses_remaining_raw: Option<i64>) -> Result<SetupKeyUsage> {
+    if usage_str == "one_off" {
+        return Ok(SetupKeyUsage::OneOff);
+    }
+    // Try parsing as {"reusable": N}
+    let v: serde_json::Value = serde_json::from_str(usage_str)
+        .map_err(|e| anyhow::anyhow!("unknown usage format '{usage_str}': {e}"))?;
+    if let Some(max_uses) = v.get("reusable").and_then(|n| n.as_u64()) {
+        return Ok(SetupKeyUsage::Reusable {
+            max_uses: max_uses as u32,
+        });
+    }
+    // Fallback: if uses_remaining is available, use it as max_uses
+    if let Some(n) = uses_remaining_raw {
+        return Ok(SetupKeyUsage::Reusable { max_uses: n as u32 });
+    }
+    Err(anyhow::anyhow!("unknown usage format: {usage_str}"))
+}
+
+fn row_to_setup_key(row: &rusqlite::Row) -> Result<SetupKey> {
+    let id_str: String = row.get(0)?;
+    let key_hash: String = row.get(1)?;
+    let user_id_str: String = row.get(2)?;
+    let group_id_str: String = row.get(3)?;
+    let usage_str: String = row.get(4)?;
+    let uses_remaining_raw: Option<i64> = row.get(5)?;
+    let created_at_str: String = row.get(6)?;
+    let expires_at_str: String = row.get(7)?;
+
+    let usage = db_str_to_usage(&usage_str, uses_remaining_raw)?;
+    let uses_remaining = match &usage {
+        SetupKeyUsage::OneOff => None,
+        SetupKeyUsage::Reusable { .. } => uses_remaining_raw.map(|n| n as u32),
+    };
+
+    Ok(SetupKey {
+        id: Uuid::parse_str(&id_str)?,
+        key_hash,
+        user_id: UserId::parse_str(&user_id_str)?,
+        group_id: GroupId::parse_str(&group_id_str)?,
+        usage,
+        uses_remaining,
+        created_at: chrono::DateTime::parse_from_rfc3339(&created_at_str)?.to_utc(),
+        expires_at: chrono::DateTime::parse_from_rfc3339(&expires_at_str)?.to_utc(),
+    })
 }
 
 fn row_to_card(row: &rusqlite::Row) -> Result<AgentCard> {
@@ -1026,5 +1267,214 @@ mod tests {
         // Only one group should exist after two calls.
         let groups = db.list_groups_for_user(&user.id).unwrap();
         assert_eq!(groups.len(), 1);
+    }
+
+    // ── SetupKey tests ────────────────────────────────────────────────────────
+
+    fn make_setup_key(
+        user_id: UserId,
+        group_id: GroupId,
+        usage: SetupKeyUsage,
+        expires_in_hours: i64,
+    ) -> SetupKey {
+        let now = chrono::Utc::now();
+        let uses_remaining = match &usage {
+            SetupKeyUsage::OneOff => None,
+            SetupKeyUsage::Reusable { max_uses } => Some(*max_uses),
+        };
+        SetupKey {
+            id: Uuid::new_v4(),
+            key_hash: format!("hash-{}", Uuid::new_v4()),
+            user_id,
+            group_id,
+            usage,
+            uses_remaining,
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(expires_in_hours),
+        }
+    }
+
+    #[test]
+    fn create_and_verify_setup_key_oneoff() {
+        let db = test_db();
+        let (user_id, group_id) = ensure_test_user(&db);
+        let key = make_setup_key(user_id, group_id, SetupKeyUsage::OneOff, 24);
+        db.create_setup_key(&key).unwrap();
+
+        // First use succeeds
+        let result = db.verify_setup_key(&key.key_hash).unwrap();
+        assert!(result.is_some());
+        let verified = result.unwrap();
+        assert_eq!(verified.id, key.id);
+        assert_eq!(verified.usage, SetupKeyUsage::OneOff);
+
+        // Second use fails (already consumed)
+        let result2 = db.verify_setup_key(&key.key_hash).unwrap();
+        assert!(result2.is_none());
+    }
+
+    #[test]
+    fn verify_setup_key_expired() {
+        let db = test_db();
+        let (user_id, group_id) = ensure_test_user(&db);
+        let key = make_setup_key(user_id, group_id, SetupKeyUsage::OneOff, -1);
+        db.create_setup_key(&key).unwrap();
+
+        let result = db.verify_setup_key(&key.key_hash).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn verify_setup_key_not_found() {
+        let db = test_db();
+        let result = db.verify_setup_key("nonexistent-hash").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn create_and_verify_setup_key_reusable() {
+        let db = test_db();
+        let (user_id, group_id) = ensure_test_user(&db);
+        let key = make_setup_key(
+            user_id,
+            group_id,
+            SetupKeyUsage::Reusable { max_uses: 3 },
+            24,
+        );
+        db.create_setup_key(&key).unwrap();
+
+        // Use 1
+        let r1 = db.verify_setup_key(&key.key_hash).unwrap();
+        assert!(r1.is_some());
+        assert_eq!(r1.unwrap().uses_remaining, Some(2));
+
+        // Use 2
+        let r2 = db.verify_setup_key(&key.key_hash).unwrap();
+        assert!(r2.is_some());
+        assert_eq!(r2.unwrap().uses_remaining, Some(1));
+
+        // Use 3
+        let r3 = db.verify_setup_key(&key.key_hash).unwrap();
+        assert!(r3.is_some());
+        assert_eq!(r3.unwrap().uses_remaining, Some(0));
+
+        // Use 4: exceeds max_uses
+        let r4 = db.verify_setup_key(&key.key_hash).unwrap();
+        assert!(r4.is_none());
+    }
+
+    #[test]
+    fn verify_setup_key_reusable_zero_uses_remaining() {
+        let db = test_db();
+        let (user_id, group_id) = ensure_test_user(&db);
+        // Create a reusable key with uses_remaining already 0
+        let mut key = make_setup_key(
+            user_id,
+            group_id,
+            SetupKeyUsage::Reusable { max_uses: 0 },
+            24,
+        );
+        key.uses_remaining = Some(0);
+        db.create_setup_key(&key).unwrap();
+
+        let result = db.verify_setup_key(&key.key_hash).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn list_setup_keys_by_user() {
+        let db = test_db();
+        let (user_id, group_id) = ensure_test_user(&db);
+
+        let key1 = make_setup_key(user_id, group_id, SetupKeyUsage::OneOff, 24);
+        let key2 = make_setup_key(
+            user_id,
+            group_id,
+            SetupKeyUsage::Reusable { max_uses: 5 },
+            48,
+        );
+        db.create_setup_key(&key1).unwrap();
+        db.create_setup_key(&key2).unwrap();
+
+        let keys = db.list_setup_keys(&user_id).unwrap();
+        assert_eq!(keys.len(), 2);
+
+        let ids: Vec<Uuid> = keys.iter().map(|k| k.id).collect();
+        assert!(ids.contains(&key1.id));
+        assert!(ids.contains(&key2.id));
+    }
+
+    #[test]
+    fn list_setup_keys_filters_by_user() {
+        let db = test_db();
+        let (user_id, group_id) = ensure_test_user(&db);
+
+        // Create a second user
+        let user2 = User {
+            id: UserId::new_v4(),
+            external_id: "sk-test-user2".to_string(),
+            provider: "test".to_string(),
+            display_name: None,
+            created_at: chrono::Utc::now(),
+        };
+        db.create_user(&user2).unwrap();
+
+        let key1 = make_setup_key(user_id, group_id, SetupKeyUsage::OneOff, 24);
+        let key2 = make_setup_key(user2.id, group_id, SetupKeyUsage::OneOff, 24);
+        db.create_setup_key(&key1).unwrap();
+        db.create_setup_key(&key2).unwrap();
+
+        let keys = db.list_setup_keys(&user_id).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].id, key1.id);
+    }
+
+    #[test]
+    fn revoke_setup_key_success() {
+        let db = test_db();
+        let (user_id, group_id) = ensure_test_user(&db);
+        let key = make_setup_key(user_id, group_id, SetupKeyUsage::OneOff, 24);
+        db.create_setup_key(&key).unwrap();
+
+        let result = db.revoke_setup_key(&key.id, &user_id).unwrap();
+        assert!(result);
+
+        // After revoke, list should be empty
+        let keys = db.list_setup_keys(&user_id).unwrap();
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn revoke_setup_key_wrong_owner() {
+        let db = test_db();
+        let (user_id, group_id) = ensure_test_user(&db);
+
+        let user2 = User {
+            id: UserId::new_v4(),
+            external_id: "revoke-test-user2".to_string(),
+            provider: "test".to_string(),
+            display_name: None,
+            created_at: chrono::Utc::now(),
+        };
+        db.create_user(&user2).unwrap();
+
+        let key = make_setup_key(user_id, group_id, SetupKeyUsage::OneOff, 24);
+        db.create_setup_key(&key).unwrap();
+
+        // user2 tries to revoke user1's key
+        let result = db.revoke_setup_key(&key.id, &user2.id).unwrap();
+        assert!(!result);
+
+        // Key should still exist for user1
+        let keys = db.list_setup_keys(&user_id).unwrap();
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[test]
+    fn revoke_setup_key_not_found() {
+        let db = test_db();
+        let (user_id, _) = ensure_test_user(&db);
+        let result = db.revoke_setup_key(&Uuid::new_v4(), &user_id).unwrap();
+        assert!(!result);
     }
 }

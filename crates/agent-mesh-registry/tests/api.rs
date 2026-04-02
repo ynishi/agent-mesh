@@ -2,11 +2,14 @@ use std::future::IntoFuture;
 use std::sync::Arc;
 
 use agent_mesh_core::agent_card::{AgentCardRegistration, Capability};
-use agent_mesh_core::identity::{AgentKeypair, UserId};
-use agent_mesh_core::user::{ApiToken, Group, GroupMember, GroupRole, User};
+use agent_mesh_core::identity::{AgentKeypair, GroupId, UserId};
+use agent_mesh_core::user::{
+    ApiToken, Group, GroupMember, GroupRole, SetupKey, SetupKeyUsage, User,
+};
 use agent_mesh_registry::auth::hash_token;
 use agent_mesh_registry::db::Database;
 use agent_mesh_registry::AppState;
+use uuid::Uuid;
 
 async fn start_registry() -> (String, Arc<Database>) {
     let db = Arc::new(Database::open(":memory:").expect("in-memory db"));
@@ -22,11 +25,17 @@ async fn start_registry() -> (String, Arc<Database>) {
     (format!("http://127.0.0.1:{}", addr.port()), db)
 }
 
-/// Create a test user, group, and API token. Returns (user_id, raw_token).
+/// Create a test user, group, and API token. Returns (user_id, group_id, raw_token).
 fn setup_auth(db: &Arc<Database>) -> (UserId, String) {
+    let (user_id, _group_id, raw_token) = setup_auth_with_group(db);
+    (user_id, raw_token)
+}
+
+/// Create a test user, group, and API token. Returns (user_id, group_id, raw_token).
+fn setup_auth_with_group(db: &Arc<Database>) -> (UserId, GroupId, String) {
     let user = User {
         id: UserId::new_v4(),
-        external_id: format!("test-user-{}", uuid::Uuid::new_v4()),
+        external_id: format!("test-user-{}", Uuid::new_v4()),
         provider: "test".to_string(),
         display_name: Some("Test User".to_string()),
         created_at: chrono::Utc::now(),
@@ -34,7 +43,7 @@ fn setup_auth(db: &Arc<Database>) -> (UserId, String) {
     db.create_user(&user).expect("create test user");
 
     let group = Group {
-        id: agent_mesh_core::identity::GroupId::new_v4(),
+        id: GroupId::new_v4(),
         name: "test-group".to_string(),
         created_by: user.id,
         created_at: chrono::Utc::now(),
@@ -47,7 +56,7 @@ fn setup_auth(db: &Arc<Database>) -> (UserId, String) {
     })
     .expect("add group member");
 
-    let raw_token = format!("test-token-{}", uuid::Uuid::new_v4());
+    let raw_token = format!("test-token-{}", Uuid::new_v4());
     let token = ApiToken {
         token_hash: hash_token(&raw_token),
         user_id: user.id,
@@ -56,7 +65,7 @@ fn setup_auth(db: &Arc<Database>) -> (UserId, String) {
     };
     db.create_api_token(&token).expect("create api token");
 
-    (user.id, raw_token)
+    (user.id, group.id, raw_token)
 }
 
 fn make_registration(agent_id: &str, name: &str, caps: &[&str]) -> AgentCardRegistration {
@@ -398,4 +407,169 @@ async fn delete_agent_wrong_owner() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 403);
+}
+
+// ── register_with_setup_key tests ────────────────────────────────────────────
+
+fn make_setup_key(
+    db: &Arc<Database>,
+    user_id: UserId,
+    group_id: GroupId,
+    raw_key: &str,
+    usage: SetupKeyUsage,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> SetupKey {
+    let uses_remaining = match &usage {
+        SetupKeyUsage::OneOff => None,
+        SetupKeyUsage::Reusable { max_uses } => Some(*max_uses),
+    };
+    let key = SetupKey {
+        id: Uuid::new_v4(),
+        key_hash: hash_token(raw_key),
+        user_id,
+        group_id,
+        usage,
+        uses_remaining,
+        created_at: chrono::Utc::now(),
+        expires_at,
+    };
+    db.create_setup_key(&key).expect("create setup key");
+    key
+}
+
+#[tokio::test]
+async fn register_with_setup_key_success() {
+    let (base, db) = start_registry().await;
+    let (user_id, group_id, _token) = setup_auth_with_group(&db);
+    let raw_key = "sk_test-valid-key-1234";
+    let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    make_setup_key(
+        &db,
+        user_id,
+        group_id,
+        raw_key,
+        SetupKeyUsage::OneOff,
+        expires_at,
+    );
+
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "setup_key": raw_key,
+        "agent_id": "agent-sk-test",
+        "name": "SK Agent",
+        "capabilities": [{"name": "compute"}]
+    });
+    let resp = client
+        .post(format!("{base}/register-with-key"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let result: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(result["agent_card"]["name"], "SK Agent");
+    assert!(
+        result["api_token"].as_str().unwrap().starts_with("at_"),
+        "api_token should start with at_"
+    );
+}
+
+#[tokio::test]
+async fn register_with_setup_key_invalid_key() {
+    let (base, _db) = start_registry().await;
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "setup_key": "sk_totally-invalid-key",
+        "agent_id": "agent-bad-key",
+        "name": "Bad Key Agent",
+        "capabilities": []
+    });
+    let resp = client
+        .post(format!("{base}/register-with-key"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn register_with_setup_key_expired() {
+    let (base, db) = start_registry().await;
+    let (user_id, group_id, _token) = setup_auth_with_group(&db);
+    let raw_key = "sk_test-expired-key";
+    // expired 1 hour ago
+    let expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
+    make_setup_key(
+        &db,
+        user_id,
+        group_id,
+        raw_key,
+        SetupKeyUsage::OneOff,
+        expires_at,
+    );
+
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "setup_key": raw_key,
+        "agent_id": "agent-expired",
+        "name": "Expired Agent",
+        "capabilities": []
+    });
+    let resp = client
+        .post(format!("{base}/register-with-key"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn register_with_setup_key_oneoff_double_use() {
+    let (base, db) = start_registry().await;
+    let (user_id, group_id, _token) = setup_auth_with_group(&db);
+    let raw_key = "sk_test-oneoff-double-use";
+    let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    make_setup_key(
+        &db,
+        user_id,
+        group_id,
+        raw_key,
+        SetupKeyUsage::OneOff,
+        expires_at,
+    );
+
+    let client = reqwest::Client::new();
+
+    // First use — should succeed.
+    let body = serde_json::json!({
+        "setup_key": raw_key,
+        "agent_id": "agent-oneoff-1",
+        "name": "OneOff Agent 1",
+        "capabilities": []
+    });
+    let resp = client
+        .post(format!("{base}/register-with-key"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Second use — must return 401.
+    let body2 = serde_json::json!({
+        "setup_key": raw_key,
+        "agent_id": "agent-oneoff-2",
+        "name": "OneOff Agent 2",
+        "capabilities": []
+    });
+    let resp2 = client
+        .post(format!("{base}/register-with-key"))
+        .json(&body2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), 401);
 }
