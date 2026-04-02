@@ -1,13 +1,12 @@
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use crate::identity::AgentId;
+use crate::identity::{AgentId, MessageId};
 
 /// Envelope for all messages passing through the mesh relay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeshEnvelope {
     /// Unique message ID.
-    pub id: Uuid,
+    pub id: MessageId,
     /// Sender agent.
     pub from: AgentId,
     /// Destination agent.
@@ -16,7 +15,7 @@ pub struct MeshEnvelope {
     pub msg_type: MessageType,
     /// For Response/Error: the original request's envelope ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub in_reply_to: Option<Uuid>,
+    pub in_reply_to: Option<MessageId>,
     /// The payload (opaque JSON).
     /// When `encrypted` is true, this contains a JSON string with
     /// base64url-encoded Noise ciphertext.
@@ -57,11 +56,11 @@ pub enum MessageType {
 /// The part of the envelope that gets signed.
 #[derive(Serialize)]
 struct SignedPortion<'a> {
-    id: &'a Uuid,
+    id: &'a MessageId,
     from: &'a AgentId,
     to: &'a AgentId,
     msg_type: &'a MessageType,
-    in_reply_to: &'a Option<Uuid>,
+    in_reply_to: &'a Option<MessageId>,
     payload: &'a serde_json::Value,
     encrypted: bool,
     timestamp: i64,
@@ -83,7 +82,7 @@ impl MeshEnvelope {
         from_keypair: &crate::identity::AgentKeypair,
         to: AgentId,
         msg_type: MessageType,
-        in_reply_to: Option<Uuid>,
+        in_reply_to: Option<MessageId>,
         payload: serde_json::Value,
     ) -> Result<Self, crate::error::ProtoError> {
         Self::build(from_keypair, to, msg_type, in_reply_to, payload, false)
@@ -94,7 +93,7 @@ impl MeshEnvelope {
         from_keypair: &crate::identity::AgentKeypair,
         to: AgentId,
         msg_type: MessageType,
-        in_reply_to: Option<Uuid>,
+        in_reply_to: Option<MessageId>,
         payload: serde_json::Value,
     ) -> Result<Self, crate::error::ProtoError> {
         Self::build(from_keypair, to, msg_type, in_reply_to, payload, true)
@@ -104,14 +103,14 @@ impl MeshEnvelope {
         from_keypair: &crate::identity::AgentKeypair,
         to: AgentId,
         msg_type: MessageType,
-        in_reply_to: Option<Uuid>,
+        in_reply_to: Option<MessageId>,
         payload: serde_json::Value,
         encrypted: bool,
     ) -> Result<Self, crate::error::ProtoError> {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine;
 
-        let id = Uuid::new_v4();
+        let id = MessageId::new_v4();
         let from = from_keypair.agent_id();
         let timestamp = chrono::Utc::now().timestamp_millis();
 

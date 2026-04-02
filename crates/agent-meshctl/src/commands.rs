@@ -290,33 +290,98 @@ mod tests {
         assert_eq!(parsed.allowed_capabilities, vec!["cap1", "cap2"]);
     }
 
+    /// Setup a test user+group+token directly in the registry DB.
+    /// Returns (raw_token) that can be used as `Authorization: Bearer <token>`.
+    fn setup_registry_auth(db: &std::sync::Arc<agent_mesh_registry::db::Database>) -> String {
+        use agent_mesh_core::identity::{GroupId, UserId};
+        use agent_mesh_core::user::{ApiToken, Group, GroupMember, GroupRole, User};
+        use agent_mesh_registry::auth::hash_token;
+
+        let user = User {
+            id: UserId::new_v4(),
+            external_id: format!("test-{}", uuid::Uuid::new_v4()),
+            provider: "test".to_string(),
+            display_name: None,
+            created_at: chrono::Utc::now(),
+        };
+        db.create_user(&user).expect("create user");
+
+        let group = Group {
+            id: GroupId::new_v4(),
+            name: "test-group".to_string(),
+            created_by: user.id,
+            created_at: chrono::Utc::now(),
+        };
+        db.create_group(&group).expect("create group");
+        db.add_group_member(&GroupMember {
+            group_id: group.id,
+            user_id: user.id,
+            role: GroupRole::Owner,
+        })
+        .expect("add member");
+
+        let raw_token = format!("tok-{}", uuid::Uuid::new_v4());
+        let token = ApiToken {
+            token_hash: hash_token(&raw_token),
+            user_id: user.id,
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+        };
+        db.create_api_token(&token).expect("create token");
+
+        raw_token
+    }
+
     #[tokio::test]
     async fn discover_against_real_registry() {
         use std::future::IntoFuture;
         use std::sync::Arc;
 
         let db = Arc::new(agent_mesh_registry::db::Database::open(":memory:").unwrap());
-        let state = agent_mesh_registry::AppState {
-            db,
-            relay_url: None,
-        };
+        let state = agent_mesh_registry::AppState { db: db.clone() };
         let app = agent_mesh_registry::app(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(axum::serve(listener, app).into_future());
 
         let registry_url = format!("http://127.0.0.1:{}", addr.port());
+        let raw_token = setup_registry_auth(&db);
 
-        // Register an agent first.
-        let secret = valid_secret_hex();
-        register(&registry_url, "TestAgent", None, "test-cap", Some(&secret))
+        // Register an agent with auth token.
+        let kp = AgentKeypair::generate();
+        let reg = agent_mesh_core::agent_card::AgentCardRegistration {
+            agent_id: kp.agent_id(),
+            name: "TestAgent".to_string(),
+            description: None,
+            capabilities: vec![agent_mesh_core::agent_card::Capability {
+                name: "test-cap".to_string(),
+                description: None,
+                input_schema: None,
+                output_schema: None,
+            }],
+            metadata: None,
+        };
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{registry_url}/agents"))
+            .header("Authorization", format!("Bearer {raw_token}"))
+            .json(&reg)
+            .send()
             .await
             .unwrap();
+        assert_eq!(resp.status(), 201, "register failed");
 
-        // Discover by capability.
-        discover(&registry_url, Some("test-cap"), None)
+        // Discover by capability with auth token.
+        let resp = client
+            .get(format!("{registry_url}/agents?capability=test-cap"))
+            .header("Authorization", format!("Bearer {raw_token}"))
+            .send()
             .await
             .unwrap();
+        assert_eq!(resp.status(), 200);
+        let agents: Vec<serde_json::Value> = resp.json().await.unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["name"], "TestAgent");
     }
 
     #[tokio::test]

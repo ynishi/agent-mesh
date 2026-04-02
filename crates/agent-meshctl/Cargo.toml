@@ -33,3 +33,5 @@ hex = "0.4"
 agent-mesh-relay = { workspace = true }
 agent-mesh-registry = { workspace = true }
 axum = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }

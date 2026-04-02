@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_mesh_core::acl::AclPolicy;
+use agent_mesh_core::identity::MessageId;
 use agent_mesh_core::identity::{AgentId, AgentKeypair};
 use agent_mesh_core::message::{MeshEnvelope, MessageType};
 use agent_mesh_core::noise::{NoiseHandshake, NoiseKeypair, NoiseTransport};
@@ -11,7 +12,6 @@ use futures_util::stream::StreamExt;
 use futures_util::SinkExt;
 use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::tungstenite::Message;
-use uuid::Uuid;
 
 use crate::connection::{
     attempt_resume, challenge_response_auth, decrypt_envelope_payload, MeshConnection, PendingMap,
@@ -296,7 +296,7 @@ async fn agent_reader_loop(
     handler: Arc<dyn RequestHandler>,
 ) {
     let mut handshake_states: HashMap<String, PeerNoise> = HashMap::new();
-    let mut cancel_tokens: HashMap<Uuid, CancelNotifier> = HashMap::new();
+    let mut cancel_tokens: HashMap<MessageId, CancelNotifier> = HashMap::new();
 
     while let Some(msg) = stream.next().await {
         match msg {
@@ -608,7 +608,7 @@ async fn send_response(
     peer_key: &str,
     to: AgentId,
     msg_type: MessageType,
-    in_reply_to: Option<Uuid>,
+    in_reply_to: Option<MessageId>,
     payload: serde_json::Value,
     encrypt: bool,
 ) -> Result<(), String> {

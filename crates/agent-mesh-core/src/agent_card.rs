@@ -1,8 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use crate::identity::AgentId;
+use crate::identity::{AgentCardId, AgentId, GroupId, UserId};
 
 /// A capability that an agent exposes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -25,9 +24,13 @@ pub struct Capability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCard {
     /// Registry-assigned unique ID.
-    pub id: Uuid,
+    pub id: AgentCardId,
     /// Owner agent's identity.
     pub agent_id: AgentId,
+    /// User who owns this agent.
+    pub owner_id: UserId,
+    /// Group this agent belongs to.
+    pub group_id: GroupId,
     /// Human-readable display name.
     pub name: String,
     /// Description of what this agent does.
@@ -72,4 +75,56 @@ pub struct AgentCardQuery {
     /// Filter by agent ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<AgentId>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::{AgentCardId, AgentId, GroupId, UserId};
+
+    fn fixed_user_id() -> UserId {
+        UserId::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+    }
+
+    fn fixed_group_id() -> GroupId {
+        GroupId::parse_str("00000000-0000-0000-0000-000000000002").unwrap()
+    }
+
+    fn fixed_time() -> DateTime<Utc> {
+        "2024-01-01T00:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn agent_card_with_owner_group_serialization() {
+        let card = AgentCard {
+            id: AgentCardId::new_v4(),
+            agent_id: AgentId::from_raw("test-agent-id".to_string()),
+            owner_id: fixed_user_id(),
+            group_id: fixed_group_id(),
+            name: "Test Agent".to_string(),
+            description: None,
+            capabilities: vec![],
+            registered_at: fixed_time(),
+            updated_at: fixed_time(),
+            metadata: None,
+            online: None,
+        };
+
+        let json = serde_json::to_string(&card).unwrap();
+
+        // Confirm owner_id and group_id are present in the serialized form.
+        assert!(
+            json.contains("owner_id"),
+            "owner_id must be serialized: {json}"
+        );
+        assert!(
+            json.contains("group_id"),
+            "group_id must be serialized: {json}"
+        );
+
+        let decoded: AgentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.owner_id, card.owner_id);
+        assert_eq!(decoded.group_id, card.group_id);
+        assert_eq!(decoded.name, card.name);
+    }
 }

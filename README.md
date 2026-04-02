@@ -1,6 +1,6 @@
 # agent-mesh
 
-A transparent networking layer for agent-to-agent communication. Like Tailscale made VPN setup a single command — agent-mesh does the same for connecting AI agents.
+A private mesh network for AI agents. Capability discovery, E2E encryption, and protocol-agnostic connectivity — so agents find and talk to each other securely, without caring about where they run.
 
 ## What it does
 

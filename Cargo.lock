@@ -66,7 +66,9 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -131,6 +133,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64",
+ "chrono",
  "clap",
  "ed25519-dalek",
  "hex",
@@ -141,6 +144,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

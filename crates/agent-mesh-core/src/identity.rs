@@ -1,6 +1,9 @@
+use std::fmt;
+
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::ProtoError;
 
@@ -39,9 +42,93 @@ impl AgentId {
     }
 }
 
-impl std::fmt::Display for AgentId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for AgentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// Newtype wrapper for AgentCard UUIDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentCardId(pub Uuid);
+
+impl AgentCardId {
+    pub fn new_v4() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn parse_str(s: &str) -> Result<Self, uuid::Error> {
+        Uuid::parse_str(s).map(Self)
+    }
+}
+
+impl fmt::Display for AgentCardId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// Newtype wrapper for Message UUIDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MessageId(pub Uuid);
+
+impl MessageId {
+    pub fn new_v4() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn parse_str(s: &str) -> Result<Self, uuid::Error> {
+        Uuid::parse_str(s).map(Self)
+    }
+}
+
+impl fmt::Display for MessageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// Newtype wrapper for User UUIDs (reserved for v0.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UserId(pub Uuid);
+
+impl UserId {
+    pub fn new_v4() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn parse_str(s: &str) -> Result<Self, uuid::Error> {
+        Uuid::parse_str(s).map(Self)
+    }
+}
+
+impl fmt::Display for UserId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// Newtype wrapper for Group UUIDs (reserved for v0.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GroupId(pub Uuid);
+
+impl GroupId {
+    pub fn new_v4() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn parse_str(s: &str) -> Result<Self, uuid::Error> {
+        Uuid::parse_str(s).map(Self)
+    }
+}
+
+impl fmt::Display for GroupId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -124,5 +211,32 @@ mod tests {
         let id = kp.agent_id();
         let key = id.to_verifying_key().unwrap();
         assert_eq!(key, kp.verifying_key());
+    }
+
+    #[test]
+    fn agent_card_id_roundtrip() {
+        let id = AgentCardId::new_v4();
+        let s = id.to_string();
+        let parsed = AgentCardId::parse_str(&s).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn message_id_roundtrip() {
+        let id = MessageId::new_v4();
+        let s = id.to_string();
+        let parsed = MessageId::parse_str(&s).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn serde_transparent() {
+        let uuid = Uuid::new_v4();
+        let id = AgentCardId(uuid);
+        let json = serde_json::to_string(&id).unwrap();
+        let expected = serde_json::to_string(&uuid).unwrap();
+        assert_eq!(json, expected);
+        let deserialized: AgentCardId = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, id);
     }
 }

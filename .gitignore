@@ -1,5 +1,7 @@
 target
 workspace
 .worktree
+.worktrees
+.ryo
 .claude
 *.db

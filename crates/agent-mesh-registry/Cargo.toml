@@ -27,7 +27,8 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-reqwest = { workspace = true }
+sha2 = { workspace = true }
+tower = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }

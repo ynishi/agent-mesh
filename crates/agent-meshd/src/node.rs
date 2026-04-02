@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agent_mesh_core::identity::AgentKeypair;
+use agent_mesh_core::identity::{AgentKeypair, MessageId};
 use agent_mesh_core::message::{
     AuthChallenge, AuthHello, AuthResponse, AuthResult, MeshEnvelope, MessageType,
 };
@@ -353,7 +353,7 @@ impl MeshNode {
         peer_key: &str,
         to: agent_mesh_core::identity::AgentId,
         msg_type: MessageType,
-        in_reply_to: Option<uuid::Uuid>,
+        in_reply_to: Option<MessageId>,
         payload: serde_json::Value,
         encrypt: bool,
     ) -> Result<()> {

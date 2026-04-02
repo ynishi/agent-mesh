@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_mesh_core::identity::MessageId;
 use agent_mesh_core::identity::{AgentId, AgentKeypair};
 use agent_mesh_core::message::{
     AuthChallenge, AuthHello, AuthResponse, AuthResult, AuthResume, MeshEnvelope, MessageType,
@@ -11,7 +12,6 @@ use futures_util::stream::StreamExt;
 use futures_util::SinkExt;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_tungstenite::tungstenite::Message;
-use uuid::Uuid;
 
 use crate::error::SdkError;
 
@@ -58,9 +58,9 @@ impl StreamReceiver {
 
 // --- Shared type aliases ---
 
-pub(crate) type PendingMap = Arc<Mutex<HashMap<Uuid, oneshot::Sender<MeshEnvelope>>>>;
+pub(crate) type PendingMap = Arc<Mutex<HashMap<MessageId, oneshot::Sender<MeshEnvelope>>>>;
 pub(crate) type StreamPendingMap =
-    Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<Result<serde_json::Value, SdkError>>>>>;
+    Arc<Mutex<HashMap<MessageId, mpsc::UnboundedSender<Result<serde_json::Value, SdkError>>>>>;
 pub(crate) type SessionMap = Arc<Mutex<HashMap<String, NoiseTransport>>>;
 pub(crate) type WsSink = futures_util::stream::SplitSink<WsStream, Message>;
 pub(crate) type WsStream =
@@ -313,7 +313,7 @@ impl MeshConnection {
     pub(crate) async fn send_and_wait(
         &self,
         envelope: MeshEnvelope,
-        msg_id: Uuid,
+        msg_id: MessageId,
         timeout: Duration,
     ) -> Result<MeshEnvelope, SdkError> {
         let target = envelope.to.clone();
@@ -345,7 +345,7 @@ impl MeshConnection {
     }
 
     /// Send a Cancel message for a given request ID.
-    async fn send_cancel(&self, target: &AgentId, request_id: Uuid) {
+    async fn send_cancel(&self, target: &AgentId, request_id: MessageId) {
         let cancel = MeshEnvelope::new_signed_reply(
             &self.keypair,
             target.clone(),
