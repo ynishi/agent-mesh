@@ -1,5 +1,9 @@
+pub mod acl;
 pub mod agents;
+pub mod gate;
 pub mod groups;
 pub mod oauth;
+pub mod revocations;
 pub mod setup_keys;
+pub mod status;
 pub mod users;

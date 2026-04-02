@@ -86,6 +86,17 @@ pub fn app(state: AppState) -> Router {
             "/setup-keys/{id}",
             delete(routes::setup_keys::revoke_setup_key),
         )
+        .route(
+            "/acl",
+            post(routes::acl::create_rule).get(routes::acl::list_rules),
+        )
+        .route("/acl/{id}", delete(routes::acl::delete_rule))
+        .route(
+            "/revocations",
+            post(routes::revocations::revoke_key).get(routes::revocations::list_revocations),
+        )
+        .route("/status", get(routes::status::get_status))
+        .route("/gate/verify", post(routes::gate::verify_agent))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

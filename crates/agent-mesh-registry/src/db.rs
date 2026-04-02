@@ -80,6 +80,26 @@ impl Database {
                 expires_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_setup_keys_hash ON setup_keys(key_hash);
+
+            CREATE TABLE IF NOT EXISTS acl_rules (
+                id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL REFERENCES groups(id),
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                allowed_capabilities TEXT NOT NULL,
+                created_by TEXT NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_acl_rules_group ON acl_rules(group_id);
+
+            CREATE TABLE IF NOT EXISTS revocations (
+                agent_id TEXT PRIMARY KEY,
+                reason TEXT,
+                revoked_by TEXT NOT NULL REFERENCES users(id),
+                signature TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
             ",
         )?;
 
@@ -635,6 +655,122 @@ impl Database {
         )?;
         Ok(affected > 0)
     }
+
+    // ── AclRule methods ───────────────────────────────────────────────────────
+
+    pub fn create_acl_rule(&self, rule: &AclRuleRow) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "INSERT INTO acl_rules (id, group_id, source, target, allowed_capabilities, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                rule.id,
+                rule.group_id.0.to_string(),
+                rule.source,
+                rule.target,
+                rule.allowed_capabilities,
+                rule.created_by.0.to_string(),
+                rule.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_acl_rules_for_group(&self, group_id: &GroupId) -> Result<Vec<AclRuleRow>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, group_id, source, target, allowed_capabilities, created_by, created_at
+             FROM acl_rules WHERE group_id = ?1
+             ORDER BY created_at ASC",
+        )?;
+        let mut rows = stmt.query(params![group_id.0.to_string()])?;
+        let mut rules = Vec::new();
+        while let Some(row) = rows.next()? {
+            rules.push(row_to_acl_rule(row)?);
+        }
+        Ok(rules)
+    }
+
+    /// Delete an ACL rule by id, only if it belongs to the given group.
+    ///
+    /// Returns `true` if deleted, `false` if not found or not in the group.
+    pub fn delete_acl_rule(&self, id: &str, group_id: &GroupId) -> Result<bool> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let affected = conn.execute(
+            "DELETE FROM acl_rules WHERE id = ?1 AND group_id = ?2",
+            params![id, group_id.0.to_string()],
+        )?;
+        Ok(affected > 0)
+    }
+
+    // ── Revocation methods ────────────────────────────────────────────────────
+
+    pub fn create_revocation(&self, rev: &RevocationRow) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO revocations (agent_id, reason, revoked_by, signature, timestamp, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                rev.agent_id,
+                rev.reason,
+                rev.revoked_by.0.to_string(),
+                rev.signature,
+                rev.timestamp,
+                rev.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_revocations(&self) -> Result<Vec<RevocationRow>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT agent_id, reason, revoked_by, signature, timestamp, created_at
+             FROM revocations ORDER BY created_at DESC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut revs = Vec::new();
+        while let Some(row) = rows.next()? {
+            revs.push(row_to_revocation(row)?);
+        }
+        Ok(revs)
+    }
+
+    /// Returns `true` if the given agent_id has a revocation record.
+    pub fn is_revoked(&self, agent_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM revocations WHERE agent_id = ?1",
+            params![agent_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    // ── AgentCard count helper ────────────────────────────────────────────────
+
+    /// Count of agent_cards rows (used for /status endpoint).
+    pub fn count_agent_cards(&self) -> Result<usize> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM agent_cards", [], |row| row.get(0))?;
+        Ok(count as usize)
+    }
+
+    /// Return the group_id for a given agent_id string, or None if not found.
+    pub fn get_agent_group_id(&self, agent_id: &str) -> Result<Option<GroupId>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt =
+            conn.prepare("SELECT group_id FROM agent_cards WHERE agent_id = ?1 LIMIT 1")?;
+        let mut rows = stmt.query(params![agent_id])?;
+        match rows.next()? {
+            None => Ok(None),
+            Some(row) => {
+                let gid_str: String = row.get(0)?;
+                Ok(Some(GroupId::parse_str(&gid_str)?))
+            }
+        }
+    }
 }
 
 fn row_to_user(row: &rusqlite::Row) -> Result<User> {
@@ -770,6 +906,77 @@ fn row_to_card(row: &rusqlite::Row) -> Result<AgentCard> {
         registered_at: chrono::DateTime::parse_from_rfc3339(&registered_str)?.to_utc(),
         updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)?.to_utc(),
         online: None,
+    })
+}
+
+// ── AclRule DB row ────────────────────────────────────────────────────────────
+
+/// DB row representation for an ACL rule.
+/// Distinct from `agent_mesh_core::acl::AclRule` — this is the persistence layer struct.
+pub struct AclRuleRow {
+    pub id: String,
+    pub group_id: GroupId,
+    /// AgentId as string.
+    pub source: String,
+    /// AgentId as string.
+    pub target: String,
+    /// JSON array of capability names.
+    pub allowed_capabilities: String,
+    pub created_by: UserId,
+    /// RFC 3339 timestamp string.
+    pub created_at: String,
+}
+
+fn row_to_acl_rule(row: &rusqlite::Row) -> Result<AclRuleRow> {
+    let id: String = row.get(0)?;
+    let group_id_str: String = row.get(1)?;
+    let source: String = row.get(2)?;
+    let target: String = row.get(3)?;
+    let allowed_capabilities: String = row.get(4)?;
+    let created_by_str: String = row.get(5)?;
+    let created_at: String = row.get(6)?;
+    Ok(AclRuleRow {
+        id,
+        group_id: GroupId::parse_str(&group_id_str)?,
+        source,
+        target,
+        allowed_capabilities,
+        created_by: UserId::parse_str(&created_by_str)?,
+        created_at,
+    })
+}
+
+// ── Revocation DB row ─────────────────────────────────────────────────────────
+
+/// DB row representation for a key revocation.
+/// Distinct from `agent_mesh_core::message::KeyRevocation`.
+pub struct RevocationRow {
+    /// AgentId as string (PRIMARY KEY).
+    pub agent_id: String,
+    pub reason: Option<String>,
+    pub revoked_by: UserId,
+    /// Base64url Ed25519 signature.
+    pub signature: String,
+    /// Unix millis.
+    pub timestamp: i64,
+    /// RFC 3339 timestamp string.
+    pub created_at: String,
+}
+
+fn row_to_revocation(row: &rusqlite::Row) -> Result<RevocationRow> {
+    let agent_id: String = row.get(0)?;
+    let reason: Option<String> = row.get(1)?;
+    let revoked_by_str: String = row.get(2)?;
+    let signature: String = row.get(3)?;
+    let timestamp: i64 = row.get(4)?;
+    let created_at: String = row.get(5)?;
+    Ok(RevocationRow {
+        agent_id,
+        reason,
+        revoked_by: UserId::parse_str(&revoked_by_str)?,
+        signature,
+        timestamp,
+        created_at,
     })
 }
 
@@ -1631,5 +1838,214 @@ mod tests {
         // No group_ids filter → returns all
         let results = db.search(&AgentCardQuery::default()).unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    // ── AclRule DAO tests ─────────────────────────────────────────────────────
+
+    fn make_acl_rule_row(group_id: GroupId, created_by: UserId) -> AclRuleRow {
+        AclRuleRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            group_id,
+            source: "agent-src".to_string(),
+            target: "agent-dst".to_string(),
+            allowed_capabilities: r#"["scheduling","availability"]"#.to_string(),
+            created_by,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn create_and_list_acl_rules() {
+        let db = test_db();
+        let (user_id, group_id) = ensure_test_user(&db);
+        let rule = make_acl_rule_row(group_id, user_id);
+        db.create_acl_rule(&rule).unwrap();
+
+        let rules = db.list_acl_rules_for_group(&group_id).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, rule.id);
+        assert_eq!(rules[0].source, "agent-src");
+        assert_eq!(rules[0].target, "agent-dst");
+        assert_eq!(rules[0].allowed_capabilities, rule.allowed_capabilities);
+    }
+
+    #[test]
+    fn list_acl_rules_empty() {
+        let db = test_db();
+        let (_user_id, group_id) = ensure_test_user(&db);
+        let rules = db.list_acl_rules_for_group(&group_id).unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn list_acl_rules_scoped_to_group() {
+        let db = test_db();
+        let (user1, group1) = ensure_test_user(&db);
+        let (user2, group2) = ensure_test_user2(&db);
+
+        let rule1 = make_acl_rule_row(group1, user1);
+        let rule2 = make_acl_rule_row(group2, user2);
+        db.create_acl_rule(&rule1).unwrap();
+        db.create_acl_rule(&rule2).unwrap();
+
+        let rules_g1 = db.list_acl_rules_for_group(&group1).unwrap();
+        assert_eq!(rules_g1.len(), 1);
+        assert_eq!(rules_g1[0].id, rule1.id);
+
+        let rules_g2 = db.list_acl_rules_for_group(&group2).unwrap();
+        assert_eq!(rules_g2.len(), 1);
+        assert_eq!(rules_g2[0].id, rule2.id);
+    }
+
+    #[test]
+    fn delete_acl_rule_success() {
+        let db = test_db();
+        let (user_id, group_id) = ensure_test_user(&db);
+        let rule = make_acl_rule_row(group_id, user_id);
+        db.create_acl_rule(&rule).unwrap();
+
+        let deleted = db.delete_acl_rule(&rule.id, &group_id).unwrap();
+        assert!(deleted);
+
+        let rules = db.list_acl_rules_for_group(&group_id).unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn delete_acl_rule_wrong_group() {
+        let db = test_db();
+        let (user_id, group_id) = ensure_test_user(&db);
+        let (_user2, group2) = ensure_test_user2(&db);
+        let rule = make_acl_rule_row(group_id, user_id);
+        db.create_acl_rule(&rule).unwrap();
+
+        // Attempt to delete from the wrong group.
+        let deleted = db.delete_acl_rule(&rule.id, &group2).unwrap();
+        assert!(!deleted);
+
+        // Rule should still exist in group1.
+        let rules = db.list_acl_rules_for_group(&group_id).unwrap();
+        assert_eq!(rules.len(), 1);
+    }
+
+    #[test]
+    fn delete_acl_rule_not_found() {
+        let db = test_db();
+        let (_user_id, group_id) = ensure_test_user(&db);
+        let deleted = db.delete_acl_rule("nonexistent-id", &group_id).unwrap();
+        assert!(!deleted);
+    }
+
+    // ── Revocation DAO tests ──────────────────────────────────────────────────
+
+    fn make_revocation_row(agent_id: &str, revoked_by: UserId) -> RevocationRow {
+        RevocationRow {
+            agent_id: agent_id.to_string(),
+            reason: Some("compromised".to_string()),
+            revoked_by,
+            signature: "fakesig".to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn create_and_list_revocations() {
+        let db = test_db();
+        let (user_id, _) = ensure_test_user(&db);
+        let rev = make_revocation_row("agent-revoked-1", user_id);
+        db.create_revocation(&rev).unwrap();
+
+        let revs = db.list_revocations().unwrap();
+        assert_eq!(revs.len(), 1);
+        assert_eq!(revs[0].agent_id, "agent-revoked-1");
+        assert_eq!(revs[0].reason.as_deref(), Some("compromised"));
+    }
+
+    #[test]
+    fn list_revocations_empty() {
+        let db = test_db();
+        let revs = db.list_revocations().unwrap();
+        assert!(revs.is_empty());
+    }
+
+    #[test]
+    fn is_revoked_true() {
+        let db = test_db();
+        let (user_id, _) = ensure_test_user(&db);
+        let rev = make_revocation_row("agent-to-check", user_id);
+        db.create_revocation(&rev).unwrap();
+
+        assert!(db.is_revoked("agent-to-check").unwrap());
+    }
+
+    #[test]
+    fn is_revoked_false() {
+        let db = test_db();
+        assert!(!db.is_revoked("unknown-agent").unwrap());
+    }
+
+    #[test]
+    fn create_revocation_upsert() {
+        // PRIMARY KEY is agent_id: second insert with same agent_id should replace.
+        let db = test_db();
+        let (user_id, _) = ensure_test_user(&db);
+        let rev1 = make_revocation_row("dup-agent", user_id);
+        db.create_revocation(&rev1).unwrap();
+
+        let rev2 = RevocationRow {
+            agent_id: "dup-agent".to_string(),
+            reason: Some("second reason".to_string()),
+            revoked_by: user_id,
+            signature: "sig2".to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        db.create_revocation(&rev2).unwrap();
+
+        let revs = db.list_revocations().unwrap();
+        assert_eq!(revs.len(), 1);
+        assert_eq!(revs[0].reason.as_deref(), Some("second reason"));
+    }
+
+    // ── AgentCard count & group lookup tests ─────────────────────────────────
+
+    #[test]
+    fn count_agent_cards_zero() {
+        let db = test_db();
+        assert_eq!(db.count_agent_cards().unwrap(), 0);
+    }
+
+    #[test]
+    fn count_agent_cards_after_register() {
+        let db = test_db();
+        let (owner_id, group_id) = ensure_test_user(&db);
+        db.register(&make_reg("a1", "Alice", vec![]), owner_id, group_id)
+            .unwrap();
+        db.register(&make_reg("a2", "Bob", vec![]), owner_id, group_id)
+            .unwrap();
+        assert_eq!(db.count_agent_cards().unwrap(), 2);
+    }
+
+    #[test]
+    fn get_agent_group_id_found() {
+        let db = test_db();
+        let (owner_id, group_id) = ensure_test_user(&db);
+        db.register(
+            &make_reg("lookup-agent", "Lookup", vec![]),
+            owner_id,
+            group_id,
+        )
+        .unwrap();
+
+        let found = db.get_agent_group_id("lookup-agent").unwrap();
+        assert_eq!(found, Some(group_id));
+    }
+
+    #[test]
+    fn get_agent_group_id_not_found() {
+        let db = test_db();
+        let found = db.get_agent_group_id("ghost-agent").unwrap();
+        assert!(found.is_none());
     }
 }
