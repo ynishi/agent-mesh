@@ -105,6 +105,24 @@ impl NodeConfig {
             Err(_) => "<invalid key>".into(),
         }
     }
+
+    /// Rewrite `secret_key_hex` in the config file at `path`, preserving all other fields.
+    ///
+    /// If `path` is `None` (e.g., meshd started without a config file via CLI flags),
+    /// this is a no-op — a warning is logged and `Ok(())` is returned.
+    pub fn update_secret_key(path: Option<&str>, new_key_hex: &str) -> Result<()> {
+        let Some(p) = path else {
+            tracing::warn!("config_path not set; skipping config file rewrite after key rotation");
+            return Ok(());
+        };
+        let mut config = Self::load(p)?;
+        config.secret_key_hex = new_key_hex.to_string();
+        let content = serde_json::to_string_pretty(&config)
+            .with_context(|| "failed to serialize config for key rotation rewrite")?;
+        std::fs::write(p, content)
+            .with_context(|| format!("failed to write config after key rotation: {p}"))?;
+        Ok(())
+    }
 }
 
 /// Credentials stored in `~/.mesh/config.toml`.
@@ -388,5 +406,53 @@ mod tests {
             let dir = MeshCredentials::default_mesh_dir().unwrap();
             assert!(dir.ends_with(".mesh"));
         }
+    }
+
+    // ── update_secret_key tests ──────────────────────────────────────────────
+
+    #[test]
+    fn update_secret_key_none_path_is_noop() {
+        // Should return Ok(()) without touching any file.
+        let new_key = valid_secret_hex();
+        let result = NodeConfig::update_secret_key(None, &new_key);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn update_secret_key_rewrites_file_preserving_other_fields() {
+        let original_secret = valid_secret_hex();
+        let dir = std::env::temp_dir().join("meshd-test-update-key");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        let json = serde_json::json!({
+            "secret_key_hex": original_secret,
+            "relay_url": "ws://relay.example.com/ws",
+            "local_agent_url": "http://localhost:9000",
+            "cp_url": "http://cp.example.com",
+            "acl": { "default_deny": false, "rules": [] }
+        });
+        std::fs::write(&path, serde_json::to_string(&json).unwrap()).unwrap();
+
+        let new_secret = valid_secret_hex();
+        NodeConfig::update_secret_key(Some(path.to_str().unwrap()), &new_secret).unwrap();
+
+        let updated = NodeConfig::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(updated.secret_key_hex, new_secret);
+        // Other fields must be preserved.
+        assert_eq!(updated.relay_url, "ws://relay.example.com/ws");
+        assert_eq!(updated.local_agent_url, "http://localhost:9000");
+        assert_eq!(updated.cp_url.as_deref(), Some("http://cp.example.com"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn update_secret_key_nonexistent_path_returns_error() {
+        let result = NodeConfig::update_secret_key(
+            Some("/nonexistent/path/config.json"),
+            &valid_secret_hex(),
+        );
+        assert!(result.is_err());
     }
 }

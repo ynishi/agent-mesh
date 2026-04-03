@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use agent_mesh_core::agent_card::AgentCard;
 use agent_mesh_core::identity::{AgentKeypair, MessageId};
 use agent_mesh_core::message::{
     AuthChallenge, AuthHello, AuthResponse, AuthResult, MeshEnvelope, MessageType,
@@ -11,18 +12,24 @@ use anyhow::Result;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use futures_util::SinkExt;
 use serde::Serialize;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::{MeshCredentials, NodeConfig};
+use crate::cp_sync;
 use crate::local_api::{self, LocalApiState};
 use crate::proxy;
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+pub(crate) type WsSink = SplitSink<WsStream, Message>;
+pub(crate) type SharedSink = Arc<Mutex<Option<WsSink>>>;
+pub(crate) type SharedSessions = Arc<Mutex<HashMap<String, PeerNoise>>>;
+pub(crate) type SharedPending = Arc<Mutex<HashMap<MessageId, oneshot::Sender<MeshEnvelope>>>>;
+
 /// Peer Noise session state.
-enum PeerNoise {
+pub(crate) enum PeerNoise {
     /// Handshake in progress (waiting for msg3 from initiator).
     Handshaking(Box<NoiseHandshake>),
     /// Transport established.
@@ -31,19 +38,27 @@ enum PeerNoise {
 
 /// meshd daemon state machine.
 ///
-/// Phase 1: `Started` → `Authenticated`
-/// Phase 3 (future): → `Syncing` → `Connected`
+/// `Started` → `Authenticated` → `Syncing` → `Connected`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum NodeState {
     /// Local API running, no authentication token.
     Started,
     /// Token acquired, CP operations available.
     Authenticated,
+    /// CP Sync WebSocket connected; waiting for relay connection.
+    Syncing,
+    /// Both CP Sync and relay connections are active.
+    Connected,
 }
 
 pub struct MeshNode {
-    keypair: AgentKeypair,
-    noise_keypair: NoiseKeypair,
+    /// Current active keypair, wrapped for hot-reload support.
+    keypair: Arc<RwLock<AgentKeypair>>,
+    /// Pending new keypair during a rotation (applied on /rotate/complete).
+    pending_keypair: Arc<RwLock<Option<AgentKeypair>>>,
+    /// Notify to force immediate relay reconnect (e.g., after key rotation).
+    relay_cancel: Arc<Notify>,
+    noise_keypair: Arc<NoiseKeypair>,
     relay_url: String,
     local_agent_url: String,
     acl: Arc<RwLock<agent_mesh_core::acl::AclPolicy>>,
@@ -56,6 +71,16 @@ pub struct MeshNode {
     bearer_token: Arc<RwLock<Option<String>>>,
     /// Directory used for credential storage (typically `~/.mesh/`).
     mesh_dir: PathBuf,
+    /// Peer agent cards received from CP Sync.
+    peers: Arc<RwLock<Vec<AgentCard>>>,
+    /// Revoked key agent IDs received from CP Sync.
+    revoked_keys: Arc<RwLock<HashSet<String>>>,
+    /// Shared relay sink — None when relay is not connected.
+    shared_sink: SharedSink,
+    /// Shared Noise sessions per peer.
+    shared_sessions: SharedSessions,
+    /// Pending in-flight request map (message_id → oneshot sender).
+    shared_pending: SharedPending,
 }
 
 impl MeshNode {
@@ -78,8 +103,10 @@ impl MeshNode {
         };
 
         Ok(Self {
-            keypair,
-            noise_keypair,
+            keypair: Arc::new(RwLock::new(keypair)),
+            pending_keypair: Arc::new(RwLock::new(None)),
+            relay_cancel: Arc::new(Notify::new()),
+            noise_keypair: Arc::new(noise_keypair),
             relay_url: config.relay_url,
             local_agent_url: config.local_agent_url,
             acl: Arc::new(RwLock::new(config.acl)),
@@ -88,6 +115,11 @@ impl MeshNode {
             state: Arc::new(RwLock::new(initial_state)),
             bearer_token: Arc::new(RwLock::new(creds.bearer_token)),
             mesh_dir,
+            peers: Arc::new(RwLock::new(Vec::new())),
+            revoked_keys: Arc::new(RwLock::new(HashSet::new())),
+            shared_sink: Arc::new(Mutex::new(None)),
+            shared_sessions: Arc::new(Mutex::new(HashMap::new())),
+            shared_pending: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -115,38 +147,7 @@ impl MeshNode {
 
     // ── Internal helpers ─────────────────────────────────────────────────────
 
-    /// Start SIGHUP listener for ACL hot reload.
-    pub fn start_acl_reload_listener(&self) {
-        let Some(path) = self.config_path.clone() else {
-            return;
-        };
-        let acl = Arc::clone(&self.acl);
-        tokio::spawn(async move {
-            let Ok(mut sighup) =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-            else {
-                tracing::warn!("failed to register SIGHUP handler");
-                return;
-            };
-            loop {
-                sighup.recv().await;
-                tracing::info!("SIGHUP received, reloading ACL from {path}");
-                match NodeConfig::reload_acl(&path) {
-                    Ok(new_acl) => {
-                        let rule_count = new_acl.rules.len();
-                        *acl.write().await = new_acl;
-                        tracing::info!(rules = rule_count, "ACL reloaded");
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "ACL reload failed, keeping old policy");
-                    }
-                }
-            }
-        });
-    }
-
     pub async fn run(&self) -> Result<()> {
-        self.start_acl_reload_listener();
         tokio::select! {
             r = self.local_api_server() => {
                 tracing::error!(error = ?r, "local API server exited");
@@ -156,7 +157,32 @@ impl MeshNode {
                 tracing::error!(error = ?r, "relay loop exited");
                 r
             }
+            r = self.cp_sync_loop_wrapper() => {
+                tracing::error!(error = ?r, "CP sync loop exited");
+                r
+            }
         }
+    }
+
+    /// Wraps `cp_sync::cp_sync_loop`. If `cp_url` is not configured, waits
+    /// indefinitely so the other tasks can still operate.
+    async fn cp_sync_loop_wrapper(&self) -> Result<()> {
+        let Some(ref cp_url) = self.cp_url else {
+            tracing::info!("cp_url not configured, skipping CP sync");
+            std::future::pending::<()>().await;
+            return Ok(());
+        };
+        let agent_id = self.keypair.read().await.agent_id();
+        cp_sync::cp_sync_loop(
+            cp_url,
+            Arc::clone(&self.bearer_token),
+            &agent_id,
+            Arc::clone(&self.acl),
+            Arc::clone(&self.peers),
+            Arc::clone(&self.revoked_keys),
+            Arc::clone(&self.state),
+        )
+        .await
     }
 
     /// Relay reconnect loop. If `relay_url` is empty, waits indefinitely so the
@@ -168,11 +194,36 @@ impl MeshNode {
             return Ok(());
         }
         loop {
+            // Syncing → Connected on relay connection establishment.
+            {
+                let mut s = self.state.write().await;
+                if *s == NodeState::Syncing {
+                    *s = NodeState::Connected;
+                    tracing::info!("relay connected, state → Connected");
+                }
+            }
+
             match self.connect_and_serve().await {
                 Ok(()) => tracing::info!("relay connection closed, reconnecting..."),
                 Err(e) => tracing::warn!(error = %e, "relay connection error, reconnecting..."),
             }
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+            // Connected → Syncing on relay disconnect (if CP sync is still up).
+            {
+                let mut s = self.state.write().await;
+                if *s == NodeState::Connected {
+                    *s = NodeState::Syncing;
+                    tracing::info!("relay disconnected, state → Syncing");
+                }
+            }
+
+            // Wait 3s before reconnect, but allow relay_cancel to skip the wait immediately.
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {}
+                _ = self.relay_cancel.notified() => {
+                    tracing::info!("relay reconnect triggered by key rotation");
+                }
+            }
         }
     }
 
@@ -200,6 +251,16 @@ impl MeshNode {
             node_state: Arc::clone(&self.state),
             http_client: reqwest::Client::new(),
             mesh_dir: self.mesh_dir.clone(),
+            peers: Arc::clone(&self.peers),
+            revoked_keys: Arc::clone(&self.revoked_keys),
+            keypair: Arc::clone(&self.keypair),
+            pending_keypair: Arc::clone(&self.pending_keypair),
+            relay_cancel: Arc::clone(&self.relay_cancel),
+            config_path: self.config_path.clone(),
+            shared_sink: Arc::clone(&self.shared_sink),
+            shared_sessions: Arc::clone(&self.shared_sessions),
+            shared_pending: Arc::clone(&self.shared_pending),
+            noise_keypair: Arc::clone(&self.noise_keypair),
         };
 
         let router = local_api::router(state);
@@ -211,18 +272,28 @@ impl MeshNode {
     }
 
     async fn connect_and_serve(&self) -> Result<()> {
-        let agent_id = self.keypair.agent_id();
+        // Clone keypair at connection start to avoid holding the RwLock for the
+        // entire connection lifetime (long-lived async function).
+        let keypair = self.keypair.read().await.clone();
+        let agent_id = keypair.agent_id();
         tracing::info!(relay = %self.relay_url, agent = agent_id.as_str(), "connecting to relay");
 
         let (ws_stream, _) = tokio_tungstenite::connect_async(&self.relay_url).await?;
-        let (mut sink, mut stream) = ws_stream.split();
+        let (sink, mut stream) = ws_stream.split();
 
         // Step 1: Send AuthHello.
         let hello = AuthHello {
             agent_id: agent_id.clone(),
         };
-        sink.send(Message::text(serde_json::to_string(&hello)?))
-            .await?;
+        {
+            let mut guard = self.shared_sink.lock().await;
+            *guard = Some(sink);
+            guard
+                .as_mut()
+                .expect("just set to Some")
+                .send(Message::text(serde_json::to_string(&hello)?))
+                .await?;
+        }
         tracing::debug!("auth: hello sent");
 
         // Step 2: Receive AuthChallenge with nonce.
@@ -233,7 +304,7 @@ impl MeshNode {
         tracing::debug!("auth: challenge received");
 
         // Step 3: Sign the nonce and send AuthResponse.
-        let sig = self.keypair.sign(challenge.nonce.as_bytes());
+        let sig = keypair.sign(challenge.nonce.as_bytes());
         let sig_b64 = {
             use base64::engine::general_purpose::URL_SAFE_NO_PAD;
             use base64::Engine;
@@ -243,8 +314,14 @@ impl MeshNode {
             agent_id: agent_id.clone(),
             signature: sig_b64,
         };
-        sink.send(Message::text(serde_json::to_string(&response)?))
-            .await?;
+        {
+            let mut guard = self.shared_sink.lock().await;
+            guard
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("sink unexpectedly None during auth"))?
+                .send(Message::text(serde_json::to_string(&response)?))
+                .await?;
+        }
         tracing::debug!("auth: response sent");
 
         // Step 4: Receive AuthResult.
@@ -260,15 +337,49 @@ impl MeshNode {
         }
         tracing::info!("auth: challenge-response verified");
 
-        // Per-peer Noise sessions.
-        let mut sessions: HashMap<String, PeerNoise> = HashMap::new();
+        // Clear any stale sessions from a previous connection.
+        self.shared_sessions.lock().await.clear();
 
         // Process incoming messages.
+        let result = self.reader_loop(&mut stream, &keypair).await;
+
+        // Cleanup on disconnect (normal or error).
+        self.cleanup_relay_state().await;
+
+        result
+    }
+
+    async fn reader_loop(
+        &self,
+        stream: &mut SplitStream<WsStream>,
+        keypair: &AgentKeypair,
+    ) -> Result<()> {
         while let Some(msg) = stream.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
-                    if let Err(e) = self.handle_message(&text, &mut sink, &mut sessions).await {
-                        tracing::warn!(error = %e, "message handling error");
+                    let envelope: MeshEnvelope = match serde_json::from_str(&text) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to parse envelope");
+                            continue;
+                        }
+                    };
+
+                    if let Some(reply_to) = envelope.in_reply_to {
+                        // Response message — route to pending map.
+                        let mut pending = self.shared_pending.lock().await;
+                        if let Some(tx) = pending.remove(&reply_to) {
+                            let _ = tx.send(envelope);
+                        }
+                    } else {
+                        // Request message — delegate to handle_message.
+                        let raw = text;
+                        if let Err(e) = self
+                            .handle_message(&raw, &self.shared_sink, &self.shared_sessions, keypair)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "message handling error");
+                        }
                     }
                 }
                 Ok(Message::Close(_)) => {
@@ -284,6 +395,15 @@ impl MeshNode {
         Ok(())
     }
 
+    /// Called on relay disconnect (normal or error). Resets shared relay state
+    /// and drains pending oneshotsso waiting callers receive RecvError.
+    async fn cleanup_relay_state(&self) {
+        *self.shared_sink.lock().await = None;
+        self.shared_sessions.lock().await.clear();
+        // Drain pending: dropping Senders causes RecvError on the receiver side.
+        self.shared_pending.lock().await.clear();
+    }
+
     async fn receive_json<T: serde::de::DeserializeOwned>(
         &self,
         stream: &mut SplitStream<WsStream>,
@@ -297,8 +417,9 @@ impl MeshNode {
     async fn handle_message(
         &self,
         text: &str,
-        sink: &mut SplitSink<WsStream, Message>,
-        sessions: &mut HashMap<String, PeerNoise>,
+        sink: &SharedSink,
+        sessions: &SharedSessions,
+        keypair: &AgentKeypair,
     ) -> Result<()> {
         let envelope: MeshEnvelope = serde_json::from_str(text)?;
 
@@ -312,13 +433,14 @@ impl MeshNode {
         // Handle Noise handshake messages.
         if envelope.msg_type == MessageType::Handshake {
             return self
-                .handle_handshake(envelope, sink, sessions, &peer_key)
+                .handle_handshake(envelope, sink, sessions, &peer_key, keypair)
                 .await;
         }
 
         // For encrypted messages, decrypt the payload.
         let payload = if envelope.encrypted {
-            let transport = match sessions.get_mut(&peer_key) {
+            let mut guard = sessions.lock().await;
+            let transport = match guard.get_mut(&peer_key) {
                 Some(PeerNoise::Established(t)) => t,
                 _ => {
                     return Err(anyhow::anyhow!(
@@ -344,7 +466,7 @@ impl MeshNode {
             .get("capability")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        let my_id = self.keypair.agent_id();
+        let my_id = keypair.agent_id();
         if !self
             .acl
             .read()
@@ -366,6 +488,7 @@ impl MeshNode {
                 Some(envelope.id),
                 err_payload,
                 envelope.encrypted,
+                keypair,
             )
             .await?;
             return Ok(());
@@ -384,6 +507,7 @@ impl MeshNode {
             Some(envelope.id),
             response_payload,
             envelope.encrypted,
+            keypair,
         )
         .await?;
         Ok(())
@@ -392,20 +516,26 @@ impl MeshNode {
     async fn handle_handshake(
         &self,
         envelope: MeshEnvelope,
-        sink: &mut SplitSink<WsStream, Message>,
-        sessions: &mut HashMap<String, PeerNoise>,
+        sink: &SharedSink,
+        sessions: &SharedSessions,
         peer_key: &str,
+        keypair: &AgentKeypair,
     ) -> Result<()> {
         let hs_data = envelope
             .payload
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("handshake payload not a string"))?;
+            .ok_or_else(|| anyhow::anyhow!("handshake payload not a string"))?
+            .to_string();
 
-        match sessions.get_mut(peer_key) {
+        // Lock sessions for the entire handshake state machine to avoid
+        // partial-update issues (get_mut → remove → insert pattern).
+        let mut guard = sessions.lock().await;
+
+        match guard.get_mut(peer_key) {
             Some(PeerNoise::Handshaking(handshake)) => {
                 // XX msg3: -> s, se (from initiator)
                 handshake
-                    .read_message(hs_data)
+                    .read_message(&hs_data)
                     .map_err(|e| anyhow::anyhow!("noise read msg3: {e}"))?;
 
                 if !handshake.is_finished() {
@@ -413,14 +543,14 @@ impl MeshNode {
                 }
 
                 // Take ownership to transition state.
-                let handshake = match sessions.remove(peer_key) {
+                let handshake = match guard.remove(peer_key) {
                     Some(PeerNoise::Handshaking(h)) => *h,
                     _ => return Err(anyhow::anyhow!("unexpected peer state after msg3")),
                 };
                 let transport = handshake
                     .into_transport()
                     .map_err(|e| anyhow::anyhow!("noise transport: {e}"))?;
-                sessions.insert(peer_key.to_string(), PeerNoise::Established(transport));
+                guard.insert(peer_key.to_string(), PeerNoise::Established(transport));
                 tracing::info!(peer = peer_key, "noise handshake complete (responder)");
                 Ok(())
             }
@@ -431,7 +561,7 @@ impl MeshNode {
                     .map_err(|e| anyhow::anyhow!("noise responder init: {e}"))?;
 
                 handshake
-                    .read_message(hs_data)
+                    .read_message(&hs_data)
                     .map_err(|e| anyhow::anyhow!("noise read msg1: {e}"))?;
 
                 // XX msg2: <- e, ee, s, es
@@ -440,7 +570,7 @@ impl MeshNode {
                     .map_err(|e| anyhow::anyhow!("noise write msg2: {e}"))?;
 
                 let reply = MeshEnvelope::new_signed_reply(
-                    &self.keypair,
+                    keypair,
                     envelope.from.clone(),
                     MessageType::Handshake,
                     Some(envelope.id),
@@ -448,12 +578,24 @@ impl MeshNode {
                 )
                 .map_err(|e| anyhow::anyhow!("envelope: {e}"))?;
                 let json = serde_json::to_string(&reply)?;
-                sink.send(Message::text(json)).await?;
 
-                sessions.insert(
+                // Release the sessions lock before acquiring sink lock to
+                // maintain the lock order: sink → sessions → pending.
+                drop(guard);
+
+                sink.lock()
+                    .await
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("sink not connected during handshake"))?
+                    .send(Message::text(json))
+                    .await?;
+
+                // Re-acquire sessions lock to insert the new handshake state.
+                sessions.lock().await.insert(
                     peer_key.to_string(),
                     PeerNoise::Handshaking(Box::new(handshake)),
                 );
+
                 tracing::debug!(
                     peer = peer_key,
                     "noise handshake: msg2 sent, waiting for msg3"
@@ -466,17 +608,19 @@ impl MeshNode {
     #[allow(clippy::too_many_arguments)]
     async fn send_response(
         &self,
-        sink: &mut SplitSink<WsStream, Message>,
-        sessions: &mut HashMap<String, PeerNoise>,
+        sink: &SharedSink,
+        sessions: &SharedSessions,
         peer_key: &str,
         to: agent_mesh_core::identity::AgentId,
         msg_type: MessageType,
         in_reply_to: Option<MessageId>,
         payload: serde_json::Value,
         encrypt: bool,
+        keypair: &AgentKeypair,
     ) -> Result<()> {
         let response = if encrypt {
-            let transport = match sessions.get_mut(peer_key) {
+            let mut guard = sessions.lock().await;
+            let transport = match guard.get_mut(peer_key) {
                 Some(PeerNoise::Established(t)) => t,
                 _ => {
                     return Err(anyhow::anyhow!(
@@ -489,8 +633,10 @@ impl MeshNode {
             let ciphertext = transport
                 .encrypt(&plaintext)
                 .map_err(|e| anyhow::anyhow!("encrypt: {e}"))?;
+            // Release sessions lock before building envelope (no longer needed).
+            drop(guard);
             MeshEnvelope::new_encrypted(
-                &self.keypair,
+                keypair,
                 to,
                 msg_type,
                 in_reply_to,
@@ -498,12 +644,17 @@ impl MeshNode {
             )
             .map_err(|e| anyhow::anyhow!("envelope: {e}"))?
         } else {
-            MeshEnvelope::new_signed_reply(&self.keypair, to, msg_type, in_reply_to, payload)
+            MeshEnvelope::new_signed_reply(keypair, to, msg_type, in_reply_to, payload)
                 .map_err(|e| anyhow::anyhow!("envelope: {e}"))?
         };
 
         let json = serde_json::to_string(&response)?;
-        sink.send(Message::text(json)).await?;
+        sink.lock()
+            .await
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("sink not connected"))?
+            .send(Message::text(json))
+            .await?;
         Ok(())
     }
 }
@@ -546,8 +697,10 @@ mod tests {
             NodeState::Started
         };
         Ok(MeshNode {
-            keypair,
-            noise_keypair,
+            keypair: Arc::new(RwLock::new(keypair)),
+            pending_keypair: Arc::new(RwLock::new(None)),
+            relay_cancel: Arc::new(Notify::new()),
+            noise_keypair: Arc::new(noise_keypair),
             relay_url: cfg.relay_url,
             local_agent_url: cfg.local_agent_url,
             acl: Arc::new(RwLock::new(cfg.acl)),
@@ -556,6 +709,11 @@ mod tests {
             state: Arc::new(RwLock::new(initial_state)),
             bearer_token: Arc::new(RwLock::new(creds.bearer_token)),
             mesh_dir: mesh_dir.to_path_buf(),
+            peers: Arc::new(RwLock::new(Vec::new())),
+            revoked_keys: Arc::new(RwLock::new(HashSet::new())),
+            shared_sink: Arc::new(Mutex::new(None)),
+            shared_sessions: Arc::new(Mutex::new(HashMap::new())),
+            shared_pending: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 

@@ -4,14 +4,14 @@ use std::time::Duration;
 
 use agent_mesh_core::acl::{AclPolicy, AclRule};
 use agent_mesh_core::identity::{AgentId, AgentKeypair};
-use agent_mesh_core::message::{KeyRevocation, MeshEnvelope, MessageType};
+use agent_mesh_core::message::{MeshEnvelope, MessageType};
+use agent_mesh_relay::gate::NoopGateVerifier;
 use agent_mesh_relay::hub::Hub;
 use agent_mesh_sdk::{CancelToken, MeshAgent, MeshClient, RequestHandler, ValueStream};
-use insta::assert_json_snapshot;
 
 /// Start a relay on a random port and return (ws_url, http_base_url).
 async fn start_relay() -> (String, String) {
-    let hub = Arc::new(Hub::with_rate_limit(100.0, 200.0));
+    let hub = Arc::new(Hub::new(100.0, 200.0, Arc::new(NoopGateVerifier)));
     let app = agent_mesh_relay::app(hub);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -63,20 +63,6 @@ async fn health_check() {
     let resp = reqwest::get(format!("{http}/health")).await.unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().await.unwrap(), "ok");
-}
-
-#[tokio::test]
-async fn status_endpoint_empty() {
-    let (_ws, http) = start_relay().await;
-
-    let resp: serde_json::Value = reqwest::get(format!("{http}/status"))
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-
-    assert_json_snapshot!(resp);
 }
 
 // --- SDK integration tests ---
@@ -362,49 +348,6 @@ async fn tampered_envelope_rejected() {
     assert!(envelope.verify().is_err());
 }
 
-// --- Key revocation via HTTP endpoint ---
-
-#[tokio::test]
-async fn key_revocation_blocks_agent() {
-    let (relay_url, http) = start_relay().await;
-
-    let victim_kp = AgentKeypair::generate();
-    let victim_id = victim_kp.agent_id();
-    let victim_secret = *victim_kp.secret_bytes();
-    let attacker_kp = AgentKeypair::generate();
-
-    // Connect victim agent.
-    let handler: Arc<dyn RequestHandler> = Arc::new(EchoHandler);
-    let _victim = MeshAgent::connect(victim_kp, &relay_url, allow_all_acl(), handler)
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Revoke victim's key via HTTP (reconstruct keypair from secret bytes).
-    let victim_kp_for_revoke = AgentKeypair::from_bytes(&victim_secret);
-    let revocation = KeyRevocation::new(&victim_kp_for_revoke, Some("compromised".into()));
-    let resp = reqwest::Client::new()
-        .post(format!("{http}/revoke"))
-        .json(&revocation)
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success());
-
-    // Verify: request to revoked agent fails.
-    let attacker = MeshClient::connect(attacker_kp, &relay_url).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let result = attacker
-        .request_plaintext(
-            &victim_id,
-            serde_json::json!({"capability": "echo"}),
-            Duration::from_secs(3),
-        )
-        .await;
-    assert!(result.is_err());
-}
-
 // --- Streaming response ---
 
 #[tokio::test]
@@ -554,7 +497,7 @@ async fn request_cancellation_timeout() {
 async fn rate_limiting() {
     // Use a relay with a low rate limit.
     // Burst must be high enough for Noise handshake messages + a few requests.
-    let hub = Arc::new(Hub::with_rate_limit(5.0, 8.0));
+    let hub = Arc::new(Hub::new(5.0, 8.0, Arc::new(NoopGateVerifier)));
     let app = agent_mesh_relay::app(hub);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

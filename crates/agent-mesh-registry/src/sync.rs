@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -8,12 +9,18 @@ use axum::response::IntoResponse;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use agent_mesh_core::identity::{AgentId, GroupId};
 use agent_mesh_core::sync::SyncEvent;
 
 use crate::auth::AuthUser;
 use crate::AppState;
+
+/// Server sends a Ping frame every 30 seconds to detect silent drops.
+const PING_INTERVAL_SECS: u64 = 30;
+/// If no Pong is received within 90 seconds (3 missed pings), the connection is dead.
+const PING_TIMEOUT_SECS: u64 = 90;
 
 /// Shared, async-safe handle to a WebSocket sink.
 type SinkHandle = Arc<Mutex<SplitSink<WebSocket, Message>>>;
@@ -49,25 +56,28 @@ impl SyncHub {
     }
 
     /// Register a new WebSocket connection for an agent.
+    ///
+    /// Returns a clone of the `SinkHandle` so the caller can retain a reference
+    /// for sending server-initiated frames (e.g. Ping) without going through the hub.
     pub async fn register(
         &self,
         agent_id: AgentId,
         group_id: GroupId,
-        sink: SplitSink<WebSocket, Message>,
-    ) {
+        sink: SinkHandle,
+    ) -> SinkHandle {
         {
             let mut conns = match self.connections.write() {
                 Ok(g) => g,
                 Err(e) => {
                     tracing::error!("connections write lock poisoned: {e}");
-                    return;
+                    return sink;
                 }
             };
             conns.insert(
                 agent_id.clone(),
                 SyncConnection {
                     group_id,
-                    sink: Arc::new(Mutex::new(sink)),
+                    sink: Arc::clone(&sink),
                 },
             );
         }
@@ -76,21 +86,38 @@ impl SyncHub {
                 Ok(g) => g,
                 Err(e) => {
                     tracing::error!("group_index write lock poisoned: {e}");
-                    return;
+                    return sink;
                 }
             };
-            idx.entry(group_id).or_default().insert(agent_id);
+            idx.entry(group_id).or_default().insert(agent_id.clone());
+        }
+        self.broadcast_to_group(&group_id, &SyncEvent::AgentOnline(agent_id))
+            .await;
+        sink
+    }
+
+    /// Unregister a WebSocket connection and broadcast `AgentOffline` to the group.
+    ///
+    /// No-op if the agent is not registered.
+    pub async fn unregister(&self, agent_id: &AgentId) {
+        let group_id = self.remove_connection(agent_id);
+        if let Some(gid) = group_id {
+            self.broadcast_to_group(&gid, &SyncEvent::AgentOffline(agent_id.clone()))
+                .await;
         }
     }
 
-    /// Unregister a WebSocket connection. No-op if the agent is not registered.
-    pub async fn unregister(&self, agent_id: &AgentId) {
+    /// Remove a connection silently (no `AgentOffline` broadcast).
+    ///
+    /// Used internally when a dead connection is detected during broadcast,
+    /// to avoid recursive `unregister → broadcast → unregister` cycles.
+    fn remove_connection(&self, agent_id: &AgentId) -> Option<GroupId> {
         let group_id = {
             let mut conns = match self.connections.write() {
                 Ok(g) => g,
                 Err(e) => {
                     tracing::error!("connections write lock poisoned during unregister: {e}");
-                    return;
+                    return None;
                 }
             };
             conns.remove(agent_id).map(|c| c.group_id)
@@ -100,7 +127,7 @@ impl SyncHub {
                 Ok(g) => g,
                 Err(e) => {
                     tracing::error!("group_index write lock poisoned during unregister: {e}");
-                    return;
+                    return None;
                 }
             };
             if let Some(set) = idx.get_mut(&gid) {
@@ -109,6 +136,9 @@ impl SyncHub {
                     idx.remove(&gid);
                 }
             }
+            Some(gid)
+        } else {
+            None
         }
     }
 
@@ -167,8 +197,12 @@ impl SyncHub {
             }
         }
 
+        // Remove dead connections silently (no AgentOffline broadcast here).
+        // AgentOffline is emitted by unregister(), which is called by handle_socket
+        // on connection close or Ping timeout. Calling broadcast_to_group recursively
+        // from within broadcast_to_group would create an infinite-sized future (E0733).
         for agent_id in dead {
-            self.unregister(&agent_id).await;
+            self.remove_connection(&agent_id);
         }
     }
 
@@ -251,9 +285,17 @@ pub async fn ws_handler(
 async fn handle_socket(socket: WebSocket, state: AppState, agent_id: AgentId, group_id: GroupId) {
     let (sink, mut stream) = socket.split();
 
+    // Wrap sink in Arc<Mutex> here so handle_socket retains a clone for Ping sending
+    // while register stores its own clone. This avoids moving sink into the hub
+    // and losing the ability to send server-initiated frames. (C-1)
+    let sink_handle: SinkHandle = Arc::new(Mutex::new(sink));
+    // last_pong is local to this handler; hub does not need to read it directly.
+    let last_pong: Arc<std::sync::Mutex<Instant>> = Arc::new(std::sync::Mutex::new(Instant::now()));
+
+    // Register with the hub. Pass an Arc clone; the hub retains its own clone.
     state
         .sync_hub
-        .register(agent_id.clone(), group_id, sink)
+        .register(agent_id.clone(), group_id, Arc::clone(&sink_handle))
         .await;
 
     // Send full sync immediately after registration.
@@ -270,20 +312,74 @@ async fn handle_socket(socket: WebSocket, state: AppState, agent_id: AgentId, gr
         }
     }
 
-    // Read loop: maintain Ping/Pong, exit on Close.
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_)) => {
-                // axum's WebSocket layer auto-sends Pong; nothing to do here.
+    // Server-side ping loop with timeout detection.
+    // tokio::select! multiplexes the read stream and the ping interval timer.
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(PING_INTERVAL_SECS));
+    // Skip the first immediate tick so we don't ping before the client has time to settle.
+    ping_interval.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = ping_interval.tick() => {
+                // Check whether the client has been silent for too long.
+                let elapsed = {
+                    match last_pong.lock() {
+                        Ok(ts) => ts.elapsed(),
+                        Err(_) => {
+                            tracing::warn!(
+                                "ws_handler: last_pong lock poisoned for agent {}",
+                                agent_id.as_str()
+                            );
+                            break;
+                        }
+                    }
+                };
+                if elapsed > Duration::from_secs(PING_TIMEOUT_SECS) {
+                    tracing::warn!(
+                        agent_id = agent_id.as_str(),
+                        elapsed_secs = elapsed.as_secs(),
+                        "ws_handler: ping timeout — closing dead connection"
+                    );
+                    break;
+                }
+                // Send a Ping frame. Clone the Arc to avoid holding the map lock across await.
+                let mut sink = sink_handle.lock().await;
+                if let Err(e) = sink.send(Message::Ping(vec![].into())).await {
+                    tracing::debug!(
+                        "ws_handler: failed to send Ping to agent {}: {e}",
+                        agent_id.as_str()
+                    );
+                    break;
+                }
             }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::debug!(
-                    "ws_handler: read error for agent {}: {e}",
-                    agent_id.as_str()
-                );
-                break;
+            msg = stream.next() => {
+                match msg {
+                    Some(Ok(Message::Pong(_))) => {
+                        // Record the time of the latest Pong.
+                        match last_pong.lock() {
+                            Ok(mut ts) => *ts = Instant::now(),
+                            Err(_) => {
+                                tracing::warn!(
+                                    "ws_handler: last_pong lock poisoned on Pong for agent {}",
+                                    agent_id.as_str()
+                                );
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Ping(_))) => {
+                        // axum's WebSocket layer auto-sends Pong; nothing to do here.
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        tracing::debug!(
+                            "ws_handler: read error for agent {}: {e}",
+                            agent_id.as_str()
+                        );
+                        break;
+                    }
+                    None => break,
+                }
             }
         }
     }

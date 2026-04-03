@@ -33,14 +33,28 @@ async fn handle_connection(socket: WebSocket, hub: Arc<Hub>) {
         }
     };
 
-    // Check if agent is revoked.
-    if hub.is_revoked(&agent_id).await {
-        tracing::warn!(
-            agent = agent_id.as_str(),
-            "revoked agent attempted to connect"
-        );
-        let _ = sink.send(axum::extract::ws::Message::Close(None)).await;
-        return;
+    // Verify agent with the gate (CP lookup or noop).
+    match hub.gate.verify_agent(&agent_id).await {
+        Ok(Some(_group_id)) => {
+            // Agent is registered; proceed to registration.
+        }
+        Ok(None) => {
+            tracing::warn!(
+                agent = agent_id.as_str(),
+                "agent not registered in CP, connection rejected"
+            );
+            let _ = sink.send(axum::extract::ws::Message::Close(None)).await;
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                agent = agent_id.as_str(),
+                error = %e,
+                "gate verification failed"
+            );
+            let _ = sink.send(axum::extract::ws::Message::Close(None)).await;
+            return;
+        }
     }
 
     // Register with hub.

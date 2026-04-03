@@ -12,13 +12,11 @@ pub struct StatusResponse {
     /// Number of agent cards registered in the database.
     pub agent_count: usize,
     /// Number of agents currently connected via WebSocket sync.
-    /// Always 0 until SyncHub is implemented in Subtask 2.
+    /// Reflects SyncHub.online_agents().len() at request time.
     pub connected_agents: usize,
 }
 
 /// `GET /status` — return registry status.
-///
-/// `connected_agents` is always 0 until SyncHub is available (Subtask 2).
 pub async fn get_status(
     State(state): State<AppState>,
     AuthUser(_user_id): AuthUser,
@@ -28,9 +26,11 @@ pub async fn get_status(
         .count_agent_cards()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let connected_agents = state.sync_hub.online_agents().len();
+
     Ok(Json(StatusResponse {
         agent_count,
-        connected_agents: 0,
+        connected_agents,
     }))
 }
 
@@ -119,6 +119,7 @@ mod tests {
             .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(val["agent_count"], 0);
+        // No WS connections in unit test: connected_agents reflects SyncHub.online_agents().len() = 0.
         assert_eq!(val["connected_agents"], 0);
     }
 
@@ -157,6 +158,7 @@ mod tests {
             .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(val["agent_count"], 1);
+        // No WS connections in unit test: connected_agents reflects SyncHub.online_agents().len() = 0.
         assert_eq!(val["connected_agents"], 0);
     }
 

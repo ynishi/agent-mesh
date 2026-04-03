@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::acl::AclRule;
 use crate::agent_card::AgentCard;
-use crate::identity::AgentId;
+use crate::identity::{AgentCardId, AgentId};
 use crate::message::KeyRevocation;
 
 /// State snapshot distributed from the Control Plane to meshd instances.
@@ -50,6 +50,19 @@ pub enum SyncEvent {
     AclUpdated(Vec<AclRule>),
     /// A key was revoked.
     KeyRevoked(KeyRevocation),
+    /// A key rotation was initiated or completed.
+    KeyRotated {
+        /// The AgentCard whose key is being rotated.
+        card_id: AgentCardId,
+        /// The previous agent ID (old public key).
+        old_agent_id: AgentId,
+        /// The new agent ID (new public key).
+        new_agent_id: AgentId,
+    },
+    /// An agent has connected to the CP Sync WebSocket.
+    AgentOnline(AgentId),
+    /// An agent has disconnected from the CP Sync WebSocket (graceful close or dead connection).
+    AgentOffline(AgentId),
 }
 
 #[cfg(test)]
@@ -124,6 +137,59 @@ mod tests {
             SyncEvent::KeyRevoked(r) => {
                 assert_eq!(r.agent_id, rev.agent_id);
                 assert!(r.verify().is_ok());
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_event_agent_online_roundtrip() {
+        let kp = AgentKeypair::generate();
+        let agent_id = kp.agent_id();
+        let event = SyncEvent::AgentOnline(agent_id.clone());
+        let json = serde_json::to_string(&event).expect("serialize");
+        let de: SyncEvent = serde_json::from_str(&json).expect("deserialize");
+        match de {
+            SyncEvent::AgentOnline(id) => assert_eq!(id, agent_id),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_event_agent_offline_roundtrip() {
+        let kp = AgentKeypair::generate();
+        let agent_id = kp.agent_id();
+        let event = SyncEvent::AgentOffline(agent_id.clone());
+        let json = serde_json::to_string(&event).expect("serialize");
+        let de: SyncEvent = serde_json::from_str(&json).expect("deserialize");
+        match de {
+            SyncEvent::AgentOffline(id) => assert_eq!(id, agent_id),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_event_key_rotated_roundtrip() {
+        use crate::identity::AgentCardId;
+        let old_kp = AgentKeypair::generate();
+        let new_kp = AgentKeypair::generate();
+        let card_id = AgentCardId::new_v4();
+        let event = SyncEvent::KeyRotated {
+            card_id,
+            old_agent_id: old_kp.agent_id(),
+            new_agent_id: new_kp.agent_id(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        let de: SyncEvent = serde_json::from_str(&json).expect("deserialize");
+        match de {
+            SyncEvent::KeyRotated {
+                card_id: cid,
+                old_agent_id,
+                new_agent_id,
+            } => {
+                assert_eq!(cid, card_id);
+                assert_eq!(old_agent_id, old_kp.agent_id());
+                assert_eq!(new_agent_id, new_kp.agent_id());
             }
             other => panic!("unexpected variant: {other:?}"),
         }

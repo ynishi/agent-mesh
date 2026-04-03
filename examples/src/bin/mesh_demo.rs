@@ -157,7 +157,11 @@ async fn main() -> Result<()> {
 
 /// Start the relay using the real agent-mesh-relay crate.
 async fn start_relay() -> Result<SocketAddr> {
-    let hub = Arc::new(agent_mesh_relay::hub::Hub::with_rate_limit(100.0, 200.0));
+    let hub = Arc::new(agent_mesh_relay::hub::Hub::new(
+        100.0,
+        200.0,
+        Arc::new(agent_mesh_relay::gate::NoopGateVerifier),
+    ));
     let app = agent_mesh_relay::app(hub);
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;

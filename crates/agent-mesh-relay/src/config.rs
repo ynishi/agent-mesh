@@ -18,6 +18,11 @@ pub struct RelayConfig {
     pub rate_burst: f64,
     /// Log level (RUST_LOG format).
     pub log_level: String,
+    /// URL of the Control Plane for gate verification.
+    /// Example: "https://cp.example.com"
+    pub cp_url: Option<String>,
+    /// Bearer token for authenticating with the Control Plane.
+    pub cp_token: Option<String>,
 }
 
 impl Default for RelayConfig {
@@ -28,6 +33,8 @@ impl Default for RelayConfig {
             rate_limit: 50.0,
             rate_burst: 100.0,
             log_level: "info".into(),
+            cp_url: None,
+            cp_token: None,
         }
     }
 }

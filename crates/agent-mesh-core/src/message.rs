@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::identity::{AgentId, MessageId};
+use crate::identity::{AgentCardId, AgentId, MessageId};
 
 /// Envelope for all messages passing through the mesh relay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +275,90 @@ impl KeyRevocation {
     }
 }
 
+/// Request to rotate an agent's Ed25519 key.
+///
+/// The current key owner initiates rotation by providing the new agent ID
+/// and a cryptographic proof (signed with the current key).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyRotationRequest {
+    /// The AgentCard ID (UUID) identifying the agent.
+    pub card_id: AgentCardId,
+    /// The new agent ID (derived from the new public key).
+    pub new_agent_id: AgentId,
+    /// Proof that the requester owns the current key.
+    pub proof: KeyRotationProof,
+    /// Grace period in seconds (both keys valid during this window).
+    /// Default: 86400 (24h).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grace_period_secs: Option<u64>,
+}
+
+/// Cryptographic proof of ownership for key rotation.
+///
+/// The current (old) key signs a canonical rotation message:
+/// `"{old_agent_id}:ROTATE_TO:{new_agent_id}:{timestamp}"`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyRotationProof {
+    /// The current agent ID (signer).
+    pub old_agent_id: AgentId,
+    /// Ed25519 signature over `"{old_agent_id}:ROTATE_TO:{new_agent_id}:{timestamp}"`,
+    /// base64url-encoded.
+    pub signature: String,
+    /// Timestamp (Unix millis) when the proof was created.
+    pub timestamp: i64,
+}
+
+impl KeyRotationProof {
+    /// Create a proof signed by `keypair` that authorises rotation to `new_agent_id`.
+    pub fn new(keypair: &crate::identity::AgentKeypair, new_agent_id: &AgentId) -> Self {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+
+        let old_agent_id = keypair.agent_id();
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let canonical = Self::canonical_bytes(&old_agent_id, new_agent_id, timestamp);
+        let sig = keypair.sign(&canonical);
+        let signature = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+
+        Self {
+            old_agent_id,
+            signature,
+            timestamp,
+        }
+    }
+
+    /// Verify that this proof was signed by the agent identified by `old_agent_id`.
+    pub fn verify(&self, new_agent_id: &AgentId) -> Result<(), crate::error::ProtoError> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        use ed25519_dalek::Signature;
+
+        let canonical = Self::canonical_bytes(&self.old_agent_id, new_agent_id, self.timestamp);
+
+        let sig_bytes = URL_SAFE_NO_PAD.decode(&self.signature).map_err(|e| {
+            crate::error::ProtoError::InvalidMessage(format!("bad rotation proof sig base64: {e}"))
+        })?;
+        let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| {
+            crate::error::ProtoError::InvalidMessage(
+                "rotation proof signature must be 64 bytes".into(),
+            )
+        })?;
+        let signature = Signature::from_bytes(&sig_arr);
+
+        crate::identity::verify_signature(&self.old_agent_id, &canonical, &signature)
+    }
+
+    fn canonical_bytes(old_agent_id: &AgentId, new_agent_id: &AgentId, timestamp: i64) -> Vec<u8> {
+        format!(
+            "{}:ROTATE_TO:{}:{}",
+            old_agent_id.as_str(),
+            new_agent_id.as_str(),
+            timestamp
+        )
+        .into_bytes()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,5 +433,76 @@ mod tests {
         let deserialized: KeyRevocation = serde_json::from_str(&json).unwrap();
         assert!(deserialized.verify().is_ok());
         assert_eq!(deserialized.agent_id, rev.agent_id);
+    }
+
+    // ── KeyRotationProof tests ───────────────────────────────────────────────
+
+    #[test]
+    fn key_rotation_proof_sign_verify() {
+        let old_kp = AgentKeypair::generate();
+        let new_kp = AgentKeypair::generate();
+        let proof = KeyRotationProof::new(&old_kp, &new_kp.agent_id());
+        assert_eq!(proof.old_agent_id, old_kp.agent_id());
+        assert!(proof.verify(&new_kp.agent_id()).is_ok());
+    }
+
+    #[test]
+    fn key_rotation_proof_wrong_new_agent_fails() {
+        let old_kp = AgentKeypair::generate();
+        let new_kp = AgentKeypair::generate();
+        let other_kp = AgentKeypair::generate();
+        let proof = KeyRotationProof::new(&old_kp, &new_kp.agent_id());
+        // Verify with a different new_agent_id — canonical bytes differ.
+        assert!(proof.verify(&other_kp.agent_id()).is_err());
+    }
+
+    #[test]
+    fn key_rotation_proof_tampered_timestamp_fails() {
+        let old_kp = AgentKeypair::generate();
+        let new_kp = AgentKeypair::generate();
+        let mut proof = KeyRotationProof::new(&old_kp, &new_kp.agent_id());
+        proof.timestamp += 1;
+        assert!(proof.verify(&new_kp.agent_id()).is_err());
+    }
+
+    #[test]
+    fn key_rotation_proof_wrong_old_agent_fails() {
+        let old_kp = AgentKeypair::generate();
+        let new_kp = AgentKeypair::generate();
+        let other_kp = AgentKeypair::generate();
+        let mut proof = KeyRotationProof::new(&old_kp, &new_kp.agent_id());
+        // Swap old_agent_id to a different identity — verify_signature will reject.
+        proof.old_agent_id = other_kp.agent_id();
+        assert!(proof.verify(&new_kp.agent_id()).is_err());
+    }
+
+    #[test]
+    fn key_rotation_proof_serialization_roundtrip() {
+        let old_kp = AgentKeypair::generate();
+        let new_kp = AgentKeypair::generate();
+        let proof = KeyRotationProof::new(&old_kp, &new_kp.agent_id());
+        let json = serde_json::to_string(&proof).unwrap();
+        let de: KeyRotationProof = serde_json::from_str(&json).unwrap();
+        assert!(de.verify(&new_kp.agent_id()).is_ok());
+        assert_eq!(de.old_agent_id, proof.old_agent_id);
+    }
+
+    #[test]
+    fn key_rotation_request_serialization_roundtrip() {
+        use crate::identity::AgentCardId;
+        let old_kp = AgentKeypair::generate();
+        let new_kp = AgentKeypair::generate();
+        let card_id = AgentCardId::new_v4();
+        let proof = KeyRotationProof::new(&old_kp, &new_kp.agent_id());
+        let req = KeyRotationRequest {
+            card_id,
+            new_agent_id: new_kp.agent_id(),
+            proof,
+            grace_period_secs: Some(86400),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let de: KeyRotationRequest = serde_json::from_str(&json).unwrap();
+        assert!(de.proof.verify(&de.new_agent_id).is_ok());
+        assert_eq!(de.grace_period_secs, Some(86400));
     }
 }

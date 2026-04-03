@@ -1,15 +1,15 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_mesh_core::identity::AgentId;
-use agent_mesh_core::message::{KeyRevocation, MeshEnvelope};
+use agent_mesh_core::message::MeshEnvelope;
 use futures_util::stream::SplitSink;
 use futures_util::SinkExt;
-use rusqlite::Connection;
 use tokio::sync::{Mutex, RwLock};
+
+use crate::gate::GateVerifier;
 
 type WsSink = SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message>;
 
@@ -83,16 +83,14 @@ struct AgentSession {
 pub struct Hub {
     agents: RwLock<HashMap<String, Arc<AgentSession>>>,
     buffers: RwLock<HashMap<String, VecDeque<BufferedMessage>>>,
-    /// Set of revoked agent IDs. Revoked agents cannot authenticate or receive messages.
-    revoked: RwLock<HashSet<String>>,
     /// Session tokens for connection resumption: token → StoredSession.
     session_tokens: RwLock<HashMap<String, StoredSession>>,
     /// Per-agent rate limiters (token buckets).
     rate_limiters: Mutex<HashMap<String, TokenBucket>>,
     rate_limit: f64,
     rate_burst: f64,
-    /// SQLite path for persistent state (revocations).
-    db_path: Mutex<Option<PathBuf>>,
+    /// Gate verifier for agent connection authorization.
+    pub gate: Arc<dyn GateVerifier>,
     /// Counters for metrics.
     pub messages_routed: AtomicU64,
     pub messages_buffered: AtomicU64,
@@ -115,16 +113,15 @@ pub enum RouteResult {
 }
 
 impl Hub {
-    pub fn with_rate_limit(rate: f64, burst: f64) -> Self {
+    pub fn new(rate: f64, burst: f64, gate: Arc<dyn GateVerifier>) -> Self {
         Self {
             agents: RwLock::new(HashMap::new()),
             buffers: RwLock::new(HashMap::new()),
-            revoked: RwLock::new(HashSet::new()),
             session_tokens: RwLock::new(HashMap::new()),
             rate_limiters: Mutex::new(HashMap::new()),
             rate_limit: rate,
             rate_burst: burst,
-            db_path: Mutex::new(None),
+            gate,
             messages_routed: AtomicU64::new(0),
             messages_buffered: AtomicU64::new(0),
             messages_dropped: AtomicU64::new(0),
@@ -215,19 +212,7 @@ impl Hub {
 
     /// Route an envelope to the destination agent.
     /// If the target is offline, buffers the message for later delivery.
-    /// Rejects routing if sender or target has been revoked.
     pub async fn route(&self, envelope: &MeshEnvelope) -> Result<RouteResult, String> {
-        // Check revocation for both sender and target.
-        {
-            let revoked = self.revoked.read().await;
-            if revoked.contains(envelope.from.as_str()) {
-                return Err(format!("sender {} is revoked", envelope.from));
-            }
-            if revoked.contains(envelope.to.as_str()) {
-                return Err(format!("target {} is revoked", envelope.to));
-            }
-        }
-
         // Rate limit check (per sender).
         {
             let sender_key = envelope.from.as_str().to_string();
@@ -284,54 +269,6 @@ impl Hub {
         Ok(RouteResult::Buffered)
     }
 
-    /// Check if an agent ID has been revoked.
-    pub async fn is_revoked(&self, agent_id: &AgentId) -> bool {
-        self.revoked.read().await.contains(agent_id.as_str())
-    }
-
-    /// Process a key revocation request.
-    /// Verifies the signature, adds to revoked set, and disconnects the agent if online.
-    pub async fn revoke(&self, revocation: &KeyRevocation) -> Result<(), String> {
-        revocation
-            .verify()
-            .map_err(|e| format!("revocation signature invalid: {e}"))?;
-
-        let id_str = revocation.agent_id.as_str().to_string();
-
-        // Add to revoked set.
-        {
-            let mut revoked = self.revoked.write().await;
-            if !revoked.insert(id_str.clone()) {
-                return Ok(()); // Already revoked.
-            }
-        }
-
-        // Disconnect the agent if currently connected.
-        {
-            let mut agents = self.agents.write().await;
-            if agents.remove(&id_str).is_some() {
-                tracing::info!(agent = id_str.as_str(), "revoked agent disconnected");
-            }
-        }
-
-        // Drop any buffered messages for the revoked agent.
-        {
-            let mut buffers = self.buffers.write().await;
-            buffers.remove(&id_str);
-        }
-
-        // Persist to SQLite.
-        self.persist_revocation_async(&id_str, revocation.reason.as_deref())
-            .await;
-
-        tracing::warn!(
-            agent = id_str.as_str(),
-            reason = revocation.reason.as_deref().unwrap_or("none"),
-            "agent key revoked"
-        );
-        Ok(())
-    }
-
     /// Number of connected agents.
     pub async fn connected_count(&self) -> usize {
         self.agents.read().await.len()
@@ -340,11 +277,6 @@ impl Hub {
     /// Number of agents with buffered messages.
     pub async fn buffered_agent_count(&self) -> usize {
         self.buffers.read().await.len()
-    }
-
-    /// Number of revoked agents.
-    pub async fn revoked_count(&self) -> usize {
-        self.revoked.read().await.len()
     }
 
     /// List connected agent IDs.
@@ -376,75 +308,6 @@ impl Hub {
             return None;
         }
         Some(session.agent_id.clone())
-    }
-
-    /// Initialize SQLite persistence: create table, load revoked set.
-    pub async fn init_persistence(&self, db_path: &std::path::Path) -> Result<(), String> {
-        let db_path_owned = db_path.to_path_buf();
-        let ids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
-            let conn = Connection::open(&db_path_owned).map_err(|e| format!("open db: {e}"))?;
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS revoked_agents (
-                    agent_id TEXT PRIMARY KEY,
-                    reason TEXT,
-                    revoked_at INTEGER NOT NULL
-                )",
-            )
-            .map_err(|e| format!("create table: {e}"))?;
-
-            let mut stmt = conn
-                .prepare("SELECT agent_id FROM revoked_agents")
-                .map_err(|e| format!("prepare: {e}"))?;
-            let ids: Vec<String> = stmt
-                .query_map([], |row| row.get(0))
-                .map_err(|e| format!("query: {e}"))?
-                .filter_map(|r| r.ok())
-                .collect();
-            Ok(ids)
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking: {e}"))??;
-
-        let count = ids.len();
-        {
-            let mut revoked = self.revoked.write().await;
-            for id in ids {
-                revoked.insert(id);
-            }
-        }
-
-        *self.db_path.lock().await = Some(db_path.to_path_buf());
-
-        if count > 0 {
-            tracing::info!(count, "loaded persisted revocations");
-        }
-        Ok(())
-    }
-
-    /// Persist a revocation to SQLite (async).
-    async fn persist_revocation_async(&self, agent_id: &str, reason: Option<&str>) {
-        let db_path = {
-            let path = self.db_path.lock().await;
-            match path.as_ref() {
-                Some(p) => p.clone(),
-                None => return,
-            }
-        };
-        let agent_id = agent_id.to_string();
-        let reason = reason.map(|s| s.to_string());
-        if let Err(e) = tokio::task::spawn_blocking(move || {
-            let conn = Connection::open(&db_path)?;
-            let now = chrono::Utc::now().timestamp_millis();
-            conn.execute(
-                "INSERT OR IGNORE INTO revoked_agents (agent_id, reason, revoked_at) VALUES (?1, ?2, ?3)",
-                rusqlite::params![agent_id, reason, now],
-            )?;
-            Ok::<(), rusqlite::Error>(())
-        })
-        .await
-        {
-            tracing::warn!(error = %e, "failed to persist revocation");
-        }
     }
 
     /// Graceful shutdown: send WS Close to all connected agents.
@@ -531,6 +394,11 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gate::NoopGateVerifier;
+
+    fn make_hub(rate: f64, burst: f64) -> Hub {
+        Hub::new(rate, burst, Arc::new(NoopGateVerifier))
+    }
 
     #[test]
     fn token_bucket_allows_burst() {
@@ -559,7 +427,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_token_issue_and_validate() {
-        let hub = Hub::with_rate_limit(10.0, 5.0);
+        let hub = make_hub(10.0, 5.0);
         let token = hub.issue_session_token("agent-1").await;
 
         let result = hub.validate_session_token(&token).await;
@@ -568,39 +436,21 @@ mod tests {
 
     #[tokio::test]
     async fn session_token_invalid() {
-        let hub = Hub::with_rate_limit(10.0, 5.0);
+        let hub = make_hub(10.0, 5.0);
         let result = hub.validate_session_token("bogus-token").await;
         assert!(result.is_none());
     }
 
     #[tokio::test]
-    async fn revocation_blocks_agent() {
-        let hub = Hub::with_rate_limit(10.0, 5.0);
-        let agent_id = AgentId::from_raw("revoked-agent".to_string());
-
-        assert!(!hub.is_revoked(&agent_id).await);
-
-        // Manually insert into revoked set (bypassing signature verification)
-        hub.revoked
-            .write()
-            .await
-            .insert("revoked-agent".to_string());
-
-        assert!(hub.is_revoked(&agent_id).await);
-        assert_eq!(hub.revoked_count().await, 1);
-    }
-
-    #[tokio::test]
     async fn connected_count_starts_at_zero() {
-        let hub = Hub::with_rate_limit(10.0, 5.0);
+        let hub = make_hub(10.0, 5.0);
         assert_eq!(hub.connected_count().await, 0);
         assert_eq!(hub.buffered_agent_count().await, 0);
-        assert_eq!(hub.revoked_count().await, 0);
     }
 
     #[tokio::test]
     async fn rate_limit_enforced() {
-        let hub = Hub::with_rate_limit(10.0, 3.0); // burst=3
+        let hub = make_hub(10.0, 3.0); // burst=3
         for _ in 0..3 {
             assert!(hub.check_rate_limit("agent-1").await);
         }
@@ -612,7 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_start_at_zero() {
-        let hub = Hub::with_rate_limit(10.0, 5.0);
+        let hub = make_hub(10.0, 5.0);
         assert_eq!(hub.messages_routed.load(Ordering::Relaxed), 0);
         assert_eq!(hub.messages_buffered.load(Ordering::Relaxed), 0);
         assert_eq!(hub.messages_dropped.load(Ordering::Relaxed), 0);

@@ -101,6 +101,11 @@ pub fn app(state: AppState) -> Router {
         .route("/status", get(routes::status::get_status))
         .route("/gate/verify", post(routes::gate::verify_agent))
         .route("/sync", get(sync::ws_handler))
+        .route("/agents/{id}/rotate-key", post(routes::agents::rotate_key))
+        .route(
+            "/agents/{id}/complete-rotation",
+            post(routes::agents::complete_rotation),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

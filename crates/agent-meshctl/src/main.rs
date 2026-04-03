@@ -50,11 +50,8 @@ enum Commands {
         #[arg(long)]
         search: Option<String>,
     },
-    /// Send a request to a remote agent through the relay.
+    /// Send a request to a remote agent through meshd.
     Request {
-        /// Relay server WebSocket URL.
-        #[arg(long, default_value = "ws://localhost:9800/ws")]
-        relay: String,
         /// Target agent ID.
         #[arg(long)]
         target: String,
@@ -64,9 +61,6 @@ enum Commands {
         /// JSON payload.
         #[arg(long, default_value = "{}")]
         payload: String,
-        /// Secret key hex (or reads from MESH_SECRET_KEY env).
-        #[arg(long)]
-        secret_key: Option<String>,
         /// Timeout in seconds.
         #[arg(long, default_value = "30")]
         timeout: u64,
@@ -82,22 +76,30 @@ enum Commands {
         #[arg(long)]
         secret_key: Option<String>,
     },
+    /// Rotate the agent's Ed25519 signing key.
+    ///
+    /// By default, initiates rotation: generates a new keypair and registers it
+    /// with the Control Plane (both old and new keys are valid during the grace period).
+    ///
+    /// Use --complete to finalize a previously initiated rotation.
+    Rotate {
+        /// Grace period in seconds during which both old and new keys remain valid.
+        /// Defaults to 86400 (24 hours).
+        #[arg(long)]
+        grace_period: Option<u64>,
+        /// Complete a pending rotation instead of initiating a new one.
+        #[arg(long)]
+        complete: bool,
+    },
     /// Manage agent groups.
     Group {
         #[command(subcommand)]
         subcommand: GroupCommands,
     },
-    /// Add an ACL rule (outputs JSON to stdout for inclusion in meshd config).
+    /// Manage ACL rules.
     Acl {
-        /// Source agent ID.
-        #[arg(long)]
-        source: String,
-        /// Target agent ID.
-        #[arg(long)]
-        target: String,
-        /// Allowed capabilities (comma-separated).
-        #[arg(long)]
-        allow: String,
+        #[command(subcommand)]
+        subcommand: AclCommands,
     },
     /// Manage setup keys for non-interactive agent registration.
     SetupKey {
@@ -122,6 +124,42 @@ enum Commands {
         /// Secret key hex (or reads from MESH_SECRET_KEY env).
         #[arg(long)]
         secret_key: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AclCommands {
+    /// Output an ACL rule as JSON to stdout (offline, no meshd required).
+    Json {
+        /// Source agent ID.
+        #[arg(long)]
+        source: String,
+        /// Target agent ID.
+        #[arg(long)]
+        target: String,
+        /// Allowed capabilities (comma-separated).
+        #[arg(long)]
+        allow: String,
+    },
+    /// List all ACL rules via meshd.
+    List,
+    /// Create an ACL rule via meshd.
+    Create {
+        /// Source agent ID.
+        #[arg(long)]
+        source: String,
+        /// Target agent ID.
+        #[arg(long)]
+        target: String,
+        /// Allowed capabilities (comma-separated).
+        #[arg(long)]
+        capabilities: String,
+    },
+    /// Delete an ACL rule via meshd.
+    Delete {
+        /// ACL rule ID to delete.
+        #[arg(long)]
+        id: String,
     },
 }
 
@@ -193,33 +231,24 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Keygen => commands::keygen(),
-        Commands::Request {
-            relay,
-            target,
-            capability,
-            payload,
-            secret_key,
-            timeout,
-        } => {
-            commands::request(
-                &relay,
-                &target,
-                &capability,
-                &payload,
-                secret_key.as_deref(),
-                timeout,
-            )
-            .await
-        }
         Commands::Acl {
-            source,
-            target,
-            allow,
-        } => commands::acl(&source, &target, &allow),
+            subcommand:
+                AclCommands::Json {
+                    source,
+                    target,
+                    allow,
+                },
+        } => commands::acl_json(&source, &target, &allow),
         _ => {
             let client = daemon::ensure_meshd(sock_path).await?;
             match cli.command {
                 Commands::Login { cp_url } => commands::login(&client, &cp_url).await,
+                Commands::Request {
+                    target,
+                    capability,
+                    payload,
+                    timeout,
+                } => commands::request(&client, &target, &capability, &payload, timeout).await,
                 Commands::Register {
                     name,
                     description,
@@ -242,6 +271,10 @@ async fn main() -> Result<()> {
                 Commands::Revoke { reason, secret_key } => {
                     commands::revoke(&client, reason.as_deref(), secret_key.as_deref()).await
                 }
+                Commands::Rotate {
+                    grace_period,
+                    complete,
+                } => commands::rotate(&client, grace_period, complete).await,
                 Commands::Group { subcommand } => match subcommand {
                     GroupCommands::Create { name } => commands::group_create(&client, &name).await,
                     GroupCommands::List => commands::group_list(&client).await,
@@ -279,10 +312,19 @@ async fn main() -> Result<()> {
                     capabilities,
                     secret_key,
                 } => up_with_setup_key(&client, setup_key, &name, &capabilities, secret_key).await,
+                Commands::Acl { subcommand } => match subcommand {
+                    AclCommands::List => commands::acl_list(&client).await,
+                    AclCommands::Create {
+                        source,
+                        target,
+                        capabilities,
+                    } => commands::acl_create(&client, &source, &target, &capabilities).await,
+                    AclCommands::Delete { id } => commands::acl_delete(&client, &id).await,
+                    // Already handled above (offline, no meshd)
+                    AclCommands::Json { .. } => unreachable!(),
+                },
                 // Already handled above
-                Commands::Keygen | Commands::Request { .. } | Commands::Acl { .. } => {
-                    unreachable!()
-                }
+                Commands::Keygen => unreachable!(),
             }
         }
     }

@@ -138,6 +138,12 @@ pub struct AgentKeypair {
     signing_key: SigningKey,
 }
 
+impl Clone for AgentKeypair {
+    fn clone(&self) -> Self {
+        Self::from_bytes(self.signing_key.as_bytes())
+    }
+}
+
 impl AgentKeypair {
     pub fn generate() -> Self {
         Self {

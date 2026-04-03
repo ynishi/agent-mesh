@@ -1,4 +1,9 @@
-use agent_mesh_relay::{config::RelayConfig, hub::Hub};
+use agent_mesh_relay::{
+    config::RelayConfig,
+    gate::{HttpGateVerifier, NoopGateVerifier},
+    hub::Hub,
+    GateVerifier,
+};
 use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
@@ -18,6 +23,14 @@ struct Cli {
     /// Data directory (overrides config).
     #[arg(short, long)]
     data_dir: Option<String>,
+
+    /// Control Plane URL for gate verification (overrides config).
+    #[arg(long)]
+    cp_url: Option<String>,
+
+    /// Bearer token for CP authentication (overrides config).
+    #[arg(long)]
+    cp_token: Option<String>,
 }
 
 #[tokio::main]
@@ -32,6 +45,12 @@ async fn main() -> Result<()> {
     if let Some(data_dir) = cli.data_dir {
         cfg.data_dir = data_dir.into();
     }
+    if let Some(cp_url) = cli.cp_url {
+        cfg.cp_url = Some(cp_url);
+    }
+    if let Some(cp_token) = cli.cp_token {
+        cfg.cp_token = Some(cp_token);
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -44,14 +63,21 @@ async fn main() -> Result<()> {
     // Ensure data directory exists.
     std::fs::create_dir_all(&cfg.data_dir)?;
 
-    let hub = Arc::new(Hub::with_rate_limit(cfg.rate_limit, cfg.rate_burst));
+    let gate: Arc<dyn GateVerifier> = match (cfg.cp_url.as_deref(), cfg.cp_token.as_deref()) {
+        (Some(url), Some(token)) => Arc::new(HttpGateVerifier::new(
+            url.to_string(),
+            token.to_string(),
+            reqwest::Client::new(),
+        )),
+        _ => {
+            tracing::warn!(
+                "cp_url or cp_token not set, using NoopGateVerifier (all agents allowed)"
+            );
+            Arc::new(NoopGateVerifier)
+        }
+    };
 
-    // Load persisted revocations.
-    let db_path = cfg.data_dir.join("relay.db");
-    hub.init_persistence(&db_path)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-
+    let hub = Arc::new(Hub::new(cfg.rate_limit, cfg.rate_burst, gate));
     hub.start_reaper();
 
     let app = agent_mesh_relay::app(Arc::clone(&hub));

@@ -135,8 +135,10 @@ mod tests {
     #[test]
     fn agent_card_query_group_ids_roundtrip() {
         let gid = fixed_group_id();
-        let mut query = AgentCardQuery::default();
-        query.group_ids = Some(vec![gid]);
+        let query = AgentCardQuery {
+            group_ids: Some(vec![gid]),
+            ..Default::default()
+        };
 
         // group_ids is serialized when Some.
         let json = serde_json::to_string(&query).unwrap();

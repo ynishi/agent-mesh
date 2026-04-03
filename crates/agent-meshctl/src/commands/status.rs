@@ -21,11 +21,25 @@ pub async fn status(client: &MeshdClient) -> Result<()> {
         .get("has_token")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let peers_count = body
+        .get("peers_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let online_peers = body
+        .get("online_peers")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let revoked_count = body
+        .get("revoked_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     println!("Meshd Status:");
     println!("  State:       {state}");
     println!("  CP URL:      {cp_url}");
     println!("  Has Token:   {has_token}");
+    println!("  Peers:       {peers_count} ({online_peers} online)");
+    println!("  Revoked:     {revoked_count}");
     Ok(())
 }
 
@@ -53,7 +67,10 @@ mod tests {
                 axum::Json(serde_json::json!({
                     "state": "connected",
                     "cp_url": "https://cp.example.com",
-                    "has_token": true
+                    "has_token": true,
+                    "peers_count": 3,
+                    "online_peers": 2,
+                    "revoked_count": 0
                 }))
             }),
         );

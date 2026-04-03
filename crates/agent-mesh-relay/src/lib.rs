@@ -1,13 +1,14 @@
 pub mod config;
+pub mod gate;
 pub mod hub;
 pub mod ws;
 
-use agent_mesh_core::message::KeyRevocation;
+pub use gate::GateVerifier;
+
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::routing::get;
+use axum::Router;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
@@ -19,8 +20,6 @@ pub fn app(hub: Arc<Hub>) -> Router {
     Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/health", get(health))
-        .route("/status", get(status_handler))
-        .route("/revoke", post(revoke_handler))
         .route("/metrics", get(metrics_handler))
         .layer(TraceLayer::new_for_http())
         .with_state(hub)
@@ -30,23 +29,9 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn status_handler(State(hub): State<Arc<Hub>>) -> Json<serde_json::Value> {
+async fn metrics_handler(State(hub): State<Arc<Hub>>) -> impl IntoResponse {
     let connected = hub.connected_count().await;
     let buffered = hub.buffered_agent_count().await;
-    let revoked = hub.revoked_count().await;
-    let agents = hub.connected_agent_ids().await;
-    Json(serde_json::json!({
-        "connected_agents": connected,
-        "buffered_agents": buffered,
-        "revoked_agents": revoked,
-        "agents": agents,
-    }))
-}
-
-async fn metrics_handler(State(hub): State<Arc<Hub>>) -> String {
-    let connected = hub.connected_count().await;
-    let buffered = hub.buffered_agent_count().await;
-    let revoked = hub.revoked_count().await;
     let routed = hub.messages_routed.load(Ordering::Relaxed);
     let buffered_total = hub.messages_buffered.load(Ordering::Relaxed);
     let dropped = hub.messages_dropped.load(Ordering::Relaxed);
@@ -61,9 +46,6 @@ async fn metrics_handler(State(hub): State<Arc<Hub>>) -> String {
          # HELP mesh_buffered_agents Number of agents with buffered messages.\n\
          # TYPE mesh_buffered_agents gauge\n\
          mesh_buffered_agents {buffered}\n\
-         # HELP mesh_revoked_agents Number of revoked agent keys.\n\
-         # TYPE mesh_revoked_agents gauge\n\
-         mesh_revoked_agents {revoked}\n\
          # HELP mesh_messages_routed_total Total messages delivered directly.\n\
          # TYPE mesh_messages_routed_total counter\n\
          mesh_messages_routed_total {routed}\n\
@@ -83,14 +65,4 @@ async fn metrics_handler(State(hub): State<Arc<Hub>>) -> String {
          # TYPE mesh_auth_failures_total counter\n\
          mesh_auth_failures_total {auth_fail}\n"
     )
-}
-
-async fn revoke_handler(
-    State(hub): State<Arc<Hub>>,
-    Json(revocation): Json<KeyRevocation>,
-) -> impl IntoResponse {
-    match hub.revoke(&revocation).await {
-        Ok(()) => (StatusCode::OK, "revoked".to_string()),
-        Err(e) => (StatusCode::BAD_REQUEST, e),
-    }
 }

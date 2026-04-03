@@ -87,14 +87,12 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
- "chrono",
  "clap",
  "ed25519-dalek",
  "futures-util",
  "insta",
  "rand 0.8.5",
  "reqwest",
- "rusqlite",
  "serde",
  "serde_json",
  "tokio",
@@ -125,11 +123,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-mesh-server"
+version = "0.1.0"
+dependencies = [
+ "agent-mesh-core",
+ "agent-mesh-registry",
+ "agent-mesh-relay",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "clap",
+ "reqwest",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agent-meshctl"
 version = "0.1.0"
 dependencies = [
  "agent-mesh-core",
- "agent-mesh-sdk",
  "anyhow",
  "axum",
  "base64",
@@ -160,6 +174,7 @@ dependencies = [
  "axum",
  "base64",
  "bytes",
+ "chrono",
  "clap",
  "ed25519-dalek",
  "futures-util",
@@ -170,6 +185,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "toml",

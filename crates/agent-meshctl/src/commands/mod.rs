@@ -1,3 +1,4 @@
+pub mod acl;
 pub mod discover;
 pub mod group;
 pub mod keygen;
@@ -5,9 +6,11 @@ pub mod login;
 pub mod register;
 pub mod request;
 pub mod revoke;
+pub mod rotate;
 pub mod setup_key;
 pub mod status;
 
+pub use self::acl::{acl_create, acl_delete, acl_list};
 pub use self::discover::discover;
 pub use self::group::{group_add_member, group_create, group_list, group_remove_member};
 pub use self::keygen::keygen;
@@ -15,6 +18,7 @@ pub use self::login::login;
 pub use self::register::register;
 pub use self::request::request;
 pub use self::revoke::revoke;
+pub use self::rotate::rotate;
 pub use self::setup_key::{setup_key_create, setup_key_list, setup_key_revoke};
 pub use self::status::status;
 
@@ -36,8 +40,8 @@ pub fn resolve_secret_key(provided: Option<&str>) -> Result<AgentKeypair> {
     Ok(AgentKeypair::from_bytes(&arr))
 }
 
-/// Outputs an ACL rule as JSON to stdout.
-pub fn acl(source_id: &str, target_id: &str, allow_csv: &str) -> Result<()> {
+/// Outputs an ACL rule as JSON to stdout (offline, no meshd required).
+pub fn acl_json(source_id: &str, target_id: &str, allow_csv: &str) -> Result<()> {
     let rule = AclRule {
         source: AgentId::from_raw(source_id.to_string()),
         target: AgentId::from_raw(target_id.to_string()),
