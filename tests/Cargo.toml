@@ -1,0 +1,31 @@
+[package]
+name = "agent-mesh-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+agent-mesh-core = { workspace = true }
+agent-mesh-relay = { workspace = true }
+agent-mesh-registry = { workspace = true }
+agent-mesh-sdk = { workspace = true }
+agent-meshd = { path = "../crates/agent-meshd" }
+agent-meshctl = { path = "../crates/agent-meshctl" }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+hex = "0.4"
+hyper = { version = "1", features = ["http1", "client"] }
+tempfile = "3"
+sha2 = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { workspace = true }

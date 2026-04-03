@@ -1,26 +1,25 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use agent_mesh_core::agent_card::AgentCard;
-use agent_mesh_core::identity::{AgentId, AgentKeypair};
-use agent_mesh_core::message::{KeyRotationProof, KeyRotationRequest, MeshEnvelope, MessageType};
-use agent_mesh_core::noise::{NoiseHandshake, NoiseKeypair};
+use agent_mesh_core::identity::AgentKeypair;
+use agent_mesh_core::message::{KeyRotationProof, KeyRotationRequest};
+use agent_mesh_core::noise::NoiseKeypair;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use futures_util::SinkExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{oneshot, Notify, RwLock};
-use tokio_tungstenite::tungstenite::Message;
+use tokio::sync::{Notify, RwLock};
 
-use crate::node::{PeerNoise, SharedPending, SharedSessions, SharedSink};
+use crate::node::{SharedPending, SharedSessions, SharedSink};
 
 use crate::config::{MeshCredentials, NodeConfig};
 use crate::node::NodeState;
+
+mod request;
 
 // ── Shared state ──────────────────────────────────────────────────────────────
 
@@ -84,8 +83,30 @@ pub(crate) fn router(state: LocalApiState) -> Router {
         .route("/acl/{id}", delete(proxy_acl_delete))
         .route("/rotate", post(rotate_initiate))
         .route("/rotate/complete", post(rotate_complete))
-        .route("/request", post(mesh_request))
+        .route("/request", post(request::mesh_request))
         .with_state(state)
+}
+
+// ── Error type ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub(super) struct ApiError {
+    error: String,
+    code: u16,
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = StatusCode::from_u16(self.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (status, Json(self)).into_response()
+    }
+}
+
+pub(super) fn api_error(status: StatusCode, msg: impl Into<String>) -> ApiError {
+    ApiError {
+        error: msg.into(),
+        code: status.as_u16(),
+    }
 }
 
 // ── Request / Response types ──────────────────────────────────────────────────
@@ -153,7 +174,7 @@ async fn status(State(state): State<LocalApiState>) -> Json<StatusResponse> {
 async fn login_start(
     State(state): State<LocalApiState>,
     Json(req): Json<LoginStartRequest>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     // Store cp_url in shared state.
     {
         let mut lock = state.cp_url.write().await;
@@ -167,7 +188,7 @@ async fn login_start(
         .post(&url)
         .send()
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        .map_err(|e| api_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
 
     // On success, also persist cp_url to credentials file.
     if resp.status().is_success() {
@@ -178,7 +199,7 @@ async fn login_start(
         };
         creds
             .save(&state.mesh_dir)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
     convert_response(resp).await
@@ -187,13 +208,13 @@ async fn login_start(
 async fn login_poll(
     State(state): State<LocalApiState>,
     Json(req): Json<LoginPollRequest>,
-) -> Result<Response, (StatusCode, String)> {
-    let cp_url = state.cp_url.read().await.clone().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "cp_url not configured".into(),
-        )
-    })?;
+) -> Result<Response, ApiError> {
+    let cp_url = state
+        .cp_url
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "cp_url not configured"))?;
 
     let url = format!("{}/oauth/token", cp_url.trim_end_matches('/'));
     let body = serde_json::json!({ "device_code": req.device_code });
@@ -204,13 +225,13 @@ async fn login_poll(
         .json(&body)
         .send()
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        .map_err(|e| api_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
 
     let status = resp.status();
     let resp_body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        .map_err(|e| api_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
 
     // On success (api_token present), persist token and transition state.
     if status.is_success() {
@@ -227,7 +248,7 @@ async fn login_poll(
             };
             creds
                 .save(&state.mesh_dir)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         }
     }
 
@@ -239,9 +260,9 @@ async fn login_poll(
         .header(axum::http::header::CONTENT_TYPE, "application/json")
         .body(axum::body::Body::from(
             serde_json::to_vec(&resp_body)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+                .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
         ))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 // ── Proxy handlers (thin wrappers around proxy_to_cp) ────────────────────────
@@ -249,26 +270,22 @@ async fn login_poll(
 async fn proxy_agents_create(
     State(state): State<LocalApiState>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     proxy_to_cp(&state, reqwest::Method::POST, "/agents", Some(body)).await
 }
 
-async fn proxy_agents_list(
-    State(state): State<LocalApiState>,
-) -> Result<Response, (StatusCode, String)> {
+async fn proxy_agents_list(State(state): State<LocalApiState>) -> Result<Response, ApiError> {
     proxy_to_cp(&state, reqwest::Method::GET, "/agents", None).await
 }
 
 async fn proxy_groups_create(
     State(state): State<LocalApiState>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     proxy_to_cp(&state, reqwest::Method::POST, "/groups", Some(body)).await
 }
 
-async fn proxy_groups_list(
-    State(state): State<LocalApiState>,
-) -> Result<Response, (StatusCode, String)> {
+async fn proxy_groups_list(State(state): State<LocalApiState>) -> Result<Response, ApiError> {
     proxy_to_cp(&state, reqwest::Method::GET, "/groups", None).await
 }
 
@@ -276,7 +293,7 @@ async fn proxy_groups_add_member(
     State(state): State<LocalApiState>,
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     proxy_to_cp(
         &state,
         reqwest::Method::POST,
@@ -289,7 +306,7 @@ async fn proxy_groups_add_member(
 async fn proxy_groups_remove_member(
     State(state): State<LocalApiState>,
     axum::extract::Path((id, user_id)): axum::extract::Path<(String, String)>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     proxy_to_cp(
         &state,
         reqwest::Method::DELETE,
@@ -302,27 +319,25 @@ async fn proxy_groups_remove_member(
 async fn proxy_revocations_create(
     State(state): State<LocalApiState>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     proxy_to_cp(&state, reqwest::Method::POST, "/revocations", Some(body)).await
 }
 
 async fn proxy_setup_keys_create(
     State(state): State<LocalApiState>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     proxy_to_cp(&state, reqwest::Method::POST, "/setup-keys", Some(body)).await
 }
 
-async fn proxy_setup_keys_list(
-    State(state): State<LocalApiState>,
-) -> Result<Response, (StatusCode, String)> {
+async fn proxy_setup_keys_list(State(state): State<LocalApiState>) -> Result<Response, ApiError> {
     proxy_to_cp(&state, reqwest::Method::GET, "/setup-keys", None).await
 }
 
 async fn proxy_setup_keys_revoke(
     State(state): State<LocalApiState>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     proxy_to_cp(
         &state,
         reqwest::Method::DELETE,
@@ -335,7 +350,7 @@ async fn proxy_setup_keys_revoke(
 async fn proxy_register_with_key(
     State(state): State<LocalApiState>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     proxy_to_cp_raw(
         &state,
         reqwest::Method::POST,
@@ -345,23 +360,21 @@ async fn proxy_register_with_key(
     .await
 }
 
-async fn proxy_acl_list(
-    State(state): State<LocalApiState>,
-) -> Result<Response, (StatusCode, String)> {
+async fn proxy_acl_list(State(state): State<LocalApiState>) -> Result<Response, ApiError> {
     proxy_to_cp(&state, reqwest::Method::GET, "/acl", None).await
 }
 
 async fn proxy_acl_create(
     State(state): State<LocalApiState>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     proxy_to_cp(&state, reqwest::Method::POST, "/acl", Some(body)).await
 }
 
 async fn proxy_acl_delete(
     State(state): State<LocalApiState>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     proxy_to_cp(&state, reqwest::Method::DELETE, &format!("/acl/{id}"), None).await
 }
 
@@ -375,7 +388,7 @@ async fn proxy_acl_delete(
 async fn rotate_initiate(
     State(state): State<LocalApiState>,
     Json(req): Json<RotateInitiateRequest>,
-) -> Result<Json<RotateInitiateResponse>, (StatusCode, String)> {
+) -> Result<Json<RotateInitiateResponse>, ApiError> {
     // 1. Read current keypair (clone to release lock immediately).
     let current_keypair = state.keypair.read().await.clone();
     let own_agent_id = current_keypair.agent_id();
@@ -389,9 +402,9 @@ async fn rotate_initiate(
             .map(|p| p.id.to_string())
     }
     .ok_or_else(|| {
-        (
+        api_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            "own agent card not found in peers list; ensure CP sync is active".into(),
+            "own agent card not found in peers list; ensure CP sync is active",
         )
     })?;
 
@@ -405,7 +418,7 @@ async fn rotate_initiate(
 
     let rotation_req = KeyRotationRequest {
         card_id: agent_mesh_core::identity::AgentCardId::parse_str(&card_id).map_err(|e| {
-            (
+            api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("invalid card_id format: {e}"),
             )
@@ -416,25 +429,25 @@ async fn rotate_initiate(
     };
 
     // 5. Proxy to CP: POST /agents/{card_id}/rotate-key.
-    let cp_url = state.cp_url.read().await.clone().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "cp_url not configured".into(),
-        )
-    })?;
+    let cp_url = state
+        .cp_url
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "cp_url not configured"))?;
     let token = state
         .bearer_token
         .read()
         .await
         .clone()
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "not authenticated".into()))?;
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "not authenticated"))?;
 
     let url = format!(
         "{}/agents/{card_id}/rotate-key",
         cp_url.trim_end_matches('/')
     );
     let body = serde_json::to_value(&rotation_req)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let resp = state
         .http_client
@@ -443,12 +456,12 @@ async fn rotate_initiate(
         .json(&body)
         .send()
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        .map_err(|e| api_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let msg = resp.text().await.unwrap_or_default();
-        return Err((
+        return Err(api_error(
             axum::http::StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
             format!("CP rotate-key failed: {msg}"),
         ));
@@ -476,12 +489,12 @@ async fn rotate_initiate(
 /// the pending keypair, rewrites the config file, and triggers relay reconnect.
 async fn rotate_complete(
     State(state): State<LocalApiState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     // 1. Take pending keypair (must exist).
     let new_keypair = state.pending_keypair.write().await.take().ok_or_else(|| {
-        (
+        api_error(
             StatusCode::CONFLICT,
-            "no pending rotation; call POST /rotate first".into(),
+            "no pending rotation; call POST /rotate first",
         )
     })?;
 
@@ -497,25 +510,25 @@ async fn rotate_complete(
             .map(|p| p.id.to_string())
     }
     .ok_or_else(|| {
-        (
+        api_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            "own agent card not found in peers list".into(),
+            "own agent card not found in peers list",
         )
     })?;
 
     // 3. Proxy to CP: POST /agents/{card_id}/complete-rotation.
-    let cp_url = state.cp_url.read().await.clone().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "cp_url not configured".into(),
-        )
-    })?;
+    let cp_url = state
+        .cp_url
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "cp_url not configured"))?;
     let token = state
         .bearer_token
         .read()
         .await
         .clone()
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "not authenticated".into()))?;
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "not authenticated"))?;
 
     let url = format!(
         "{}/agents/{card_id}/complete-rotation",
@@ -528,14 +541,14 @@ async fn rotate_complete(
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        .map_err(|e| api_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let msg = resp.text().await.unwrap_or_default();
         // Re-store pending keypair so the caller can retry.
         *state.pending_keypair.write().await = Some(new_keypair);
-        return Err((
+        return Err(api_error(
             axum::http::StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
             format!("CP complete-rotation failed: {msg}"),
         ));
@@ -565,355 +578,6 @@ async fn rotate_complete(
     })))
 }
 
-// ── Mesh request handler ──────────────────────────────────────────────────────
-
-/// Request body for `POST /request`.
-#[derive(Debug, Deserialize)]
-struct MeshRequestBody {
-    /// Target agent ID.
-    target: String,
-    /// Capability to invoke.
-    capability: String,
-    /// Request payload (JSON).
-    #[serde(default)]
-    payload: serde_json::Value,
-    /// Timeout in seconds (default: 30).
-    #[serde(default = "default_timeout_secs")]
-    timeout_secs: u64,
-}
-
-fn default_timeout_secs() -> u64 {
-    30
-}
-
-/// Response body for `POST /request`.
-#[derive(Debug, Serialize)]
-struct MeshRequestResponse {
-    /// Response payload from the target agent.
-    payload: serde_json::Value,
-}
-
-/// `POST /request`
-///
-/// Send an encrypted capability request to a remote agent via the relay.
-/// Performs Noise_XX handshake if no session exists yet.
-async fn mesh_request(
-    State(state): State<LocalApiState>,
-    Json(req): Json<MeshRequestBody>,
-) -> Result<Json<MeshRequestResponse>, (StatusCode, String)> {
-    let timeout = Duration::from_secs(req.timeout_secs);
-
-    // 1. Connection check: relay must be connected.
-    {
-        let guard = state.shared_sink.lock().await;
-        if guard.is_none() {
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                "relay not connected".into(),
-            ));
-        }
-    }
-
-    // 2. Resolve target agent ID.
-    let target = AgentId::from_raw(req.target.clone());
-
-    // 3. Build the payload with the capability field injected.
-    let full_payload = match req.payload {
-        serde_json::Value::Object(mut map) => {
-            map.insert(
-                "capability".to_string(),
-                serde_json::Value::String(req.capability.clone()),
-            );
-            serde_json::Value::Object(map)
-        }
-        serde_json::Value::Null => {
-            serde_json::json!({ "capability": req.capability })
-        }
-        other => {
-            serde_json::json!({ "capability": req.capability, "data": other })
-        }
-    };
-
-    // 4. Clone keypair (release lock immediately — clone-then-release, K-4).
-    let keypair = state.keypair.read().await.clone();
-
-    // 5. Ensure Noise session (initiator handshake if not yet established).
-    ensure_noise_session(
-        &target,
-        &state.shared_sink,
-        &state.shared_sessions,
-        &state.shared_pending,
-        &state.noise_keypair,
-        &keypair,
-        timeout,
-    )
-    .await?;
-
-    // 6. Encrypt payload.
-    let plaintext = serde_json::to_vec(&full_payload)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let ciphertext = {
-        let mut guard = state.shared_sessions.lock().await;
-        let transport = match guard.get_mut(target.as_str()) {
-            Some(PeerNoise::Established(t)) => t,
-            _ => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "noise session missing after handshake".into(),
-                ))
-            }
-        };
-        transport
-            .encrypt(&plaintext)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("encrypt: {e}")))?
-    };
-
-    // 7. Build MeshEnvelope (encrypted request).
-    let envelope = MeshEnvelope::new_encrypted(
-        &keypair,
-        target.clone(),
-        MessageType::Request,
-        None,
-        serde_json::Value::String(ciphertext),
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let msg_id = envelope.id;
-
-    // 8. Register pending oneshot, then send.
-    let (tx, rx) = oneshot::channel();
-    {
-        let mut pending = state.shared_pending.lock().await;
-        pending.insert(msg_id, tx);
-    }
-
-    let json = serde_json::to_string(&envelope)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    {
-        let mut sink_guard = state.shared_sink.lock().await;
-        sink_guard
-            .as_mut()
-            .ok_or_else(|| {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "relay disconnected before send".into(),
-                )
-            })?
-            .send(Message::text(json))
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("send: {e}")))?;
-    }
-
-    // 9. Wait for response with timeout.
-    let response = match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(env)) => env,
-        Ok(Err(_)) => {
-            return Err((
-                StatusCode::GATEWAY_TIMEOUT,
-                "response channel closed".into(),
-            ))
-        }
-        Err(_) => {
-            // Timeout: clean up pending entry.
-            state.shared_pending.lock().await.remove(&msg_id);
-            return Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".into()));
-        }
-    };
-
-    // 10. Handle error response.
-    if response.msg_type == MessageType::Error {
-        let err_msg = if response.encrypted {
-            let mut guard = state.shared_sessions.lock().await;
-            if let Some(PeerNoise::Established(t)) = guard.get_mut(target.as_str()) {
-                let plaintext_bytes = response
-                    .payload
-                    .as_str()
-                    .and_then(|s| t.decrypt(s).ok())
-                    .unwrap_or_default();
-                String::from_utf8_lossy(&plaintext_bytes).to_string()
-            } else {
-                response.payload.to_string()
-            }
-        } else {
-            response.payload.to_string()
-        };
-        return Err((StatusCode::BAD_GATEWAY, err_msg));
-    }
-
-    // 11. Decrypt response payload.
-    let result_payload = if response.encrypted {
-        let ciphertext_str = response.payload.as_str().ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "encrypted payload not a string".into(),
-            )
-        })?;
-        let plaintext_bytes = {
-            let mut guard = state.shared_sessions.lock().await;
-            match guard.get_mut(target.as_str()) {
-                Some(PeerNoise::Established(t)) => t
-                    .decrypt(ciphertext_str)
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("decrypt: {e}")))?,
-                _ => {
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "noise session gone after response".into(),
-                    ))
-                }
-            }
-        };
-        serde_json::from_slice(&plaintext_bytes).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("json decode: {e}"),
-            )
-        })?
-    } else {
-        response.payload
-    };
-
-    Ok(Json(MeshRequestResponse {
-        payload: result_payload,
-    }))
-}
-
-/// Perform Noise_XX initiator handshake with `target` if no established session exists.
-///
-/// Lock order: sink → pending (same order as connect_and_serve / handle_handshake).
-async fn ensure_noise_session(
-    target: &AgentId,
-    shared_sink: &SharedSink,
-    shared_sessions: &SharedSessions,
-    shared_pending: &SharedPending,
-    noise_keypair: &NoiseKeypair,
-    keypair: &agent_mesh_core::identity::AgentKeypair,
-    timeout: Duration,
-) -> Result<(), (StatusCode, String)> {
-    // Early return if an established session already exists.
-    {
-        let guard = shared_sessions.lock().await;
-        if matches!(guard.get(target.as_str()), Some(PeerNoise::Established(_))) {
-            return Ok(());
-        }
-    }
-
-    // XX message 1: -> e
-    let mut handshake = NoiseHandshake::new_initiator(noise_keypair)
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("noise init: {e}")))?;
-
-    let hs_data1 = handshake
-        .write_message()
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("noise write msg1: {e}")))?;
-
-    let msg1 = MeshEnvelope::new_signed(
-        keypair,
-        target.clone(),
-        MessageType::Handshake,
-        serde_json::Value::String(hs_data1),
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let msg1_id = msg1.id;
-
-    // Register oneshot for msg2, then send msg1.
-    let (tx, rx) = oneshot::channel::<MeshEnvelope>();
-    {
-        let mut pending = shared_pending.lock().await;
-        pending.insert(msg1_id, tx);
-    }
-
-    let json1 = serde_json::to_string(&msg1)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    {
-        let mut sink_guard = shared_sink.lock().await;
-        sink_guard
-            .as_mut()
-            .ok_or_else(|| {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "relay not connected".into(),
-                )
-            })?
-            .send(Message::text(json1))
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("send msg1: {e}")))?;
-    }
-
-    // Wait for msg2 with timeout.
-    let msg2 = match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(env)) => env,
-        Ok(Err(_)) => {
-            return Err((
-                StatusCode::GATEWAY_TIMEOUT,
-                "handshake msg2 channel closed".into(),
-            ))
-        }
-        Err(_) => {
-            shared_pending.lock().await.remove(&msg1_id);
-            return Err((StatusCode::GATEWAY_TIMEOUT, "handshake timed out".into()));
-        }
-    };
-
-    // XX message 2: <- e, ee, s, es
-    let hs_data2 = msg2.payload.as_str().ok_or_else(|| {
-        (
-            StatusCode::BAD_GATEWAY,
-            "handshake msg2 payload not a string".into(),
-        )
-    })?;
-    handshake
-        .read_message(hs_data2)
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("noise read msg2: {e}")))?;
-
-    // XX message 3: -> s, se
-    let hs_data3 = handshake
-        .write_message()
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("noise write msg3: {e}")))?;
-
-    let msg3 = MeshEnvelope::new_signed_reply(
-        keypair,
-        target.clone(),
-        MessageType::Handshake,
-        Some(msg2.id),
-        serde_json::Value::String(hs_data3),
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Send msg3 (no response expected).
-    let json3 = serde_json::to_string(&msg3)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    {
-        let mut sink_guard = shared_sink.lock().await;
-        sink_guard
-            .as_mut()
-            .ok_or_else(|| {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "relay disconnected during handshake".into(),
-                )
-            })?
-            .send(Message::text(json3))
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("send msg3: {e}")))?;
-    }
-
-    // Transition to transport mode and store in sessions.
-    let transport = handshake
-        .into_transport()
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("noise transport: {e}")))?;
-    {
-        let mut sessions = shared_sessions.lock().await;
-        sessions.insert(
-            target.as_str().to_string(),
-            PeerNoise::Established(transport),
-        );
-    }
-
-    tracing::info!(
-        target = target.as_str(),
-        "noise handshake complete (initiator)"
-    );
-    Ok(())
-}
-
 // ── Core proxy function ───────────────────────────────────────────────────────
 
 /// Forward a request to the Control Plane, injecting the stored Bearer token.
@@ -924,20 +588,20 @@ async fn proxy_to_cp(
     method: reqwest::Method,
     path: &str,
     body: Option<serde_json::Value>,
-) -> Result<Response, (StatusCode, String)> {
-    let cp_url = state.cp_url.read().await.clone().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "cp_url not configured".into(),
-        )
-    })?;
+) -> Result<Response, ApiError> {
+    let cp_url = state
+        .cp_url
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "cp_url not configured"))?;
 
     let token = state
         .bearer_token
         .read()
         .await
         .clone()
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "not authenticated".into()))?;
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "not authenticated"))?;
 
     let url = format!("{}{}", cp_url.trim_end_matches('/'), path);
     let mut req = state.http_client.request(method, &url).bearer_auth(&token);
@@ -949,7 +613,7 @@ async fn proxy_to_cp(
     let resp = req
         .send()
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        .map_err(|e| api_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
 
     convert_response(resp).await
 }
@@ -963,13 +627,13 @@ async fn proxy_to_cp_raw(
     method: reqwest::Method,
     path: &str,
     body: Option<serde_json::Value>,
-) -> Result<Response, (StatusCode, String)> {
-    let cp_url = state.cp_url.read().await.clone().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "cp_url not configured".into(),
-        )
-    })?;
+) -> Result<Response, ApiError> {
+    let cp_url = state
+        .cp_url
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "cp_url not configured"))?;
 
     let url = format!("{}{}", cp_url.trim_end_matches('/'), path);
     let mut req = state.http_client.request(method, &url);
@@ -981,13 +645,13 @@ async fn proxy_to_cp_raw(
     let resp = req
         .send()
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        .map_err(|e| api_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
 
     convert_response(resp).await
 }
 
 /// Convert a `reqwest::Response` into an `axum::response::Response`.
-async fn convert_response(resp: reqwest::Response) -> Result<Response, (StatusCode, String)> {
+async fn convert_response(resp: reqwest::Response) -> Result<Response, ApiError> {
     let status = resp.status();
     let axum_status =
         axum::http::StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -1002,7 +666,7 @@ async fn convert_response(resp: reqwest::Response) -> Result<Response, (StatusCo
     let bytes = resp
         .bytes()
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        .map_err(|e| api_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
 
     let mut builder = Response::builder().status(axum_status);
     if let Some(ct) = content_type {
@@ -1011,7 +675,7 @@ async fn convert_response(resp: reqwest::Response) -> Result<Response, (StatusCo
 
     builder
         .body(axum::body::Body::from(bytes))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 #[cfg(test)]

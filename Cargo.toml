@@ -9,6 +9,7 @@ members = [
     "crates/agent-meshctl",
     "crates/agent-mesh-server",
     "examples",
+    "tests",
 ]
 
 [workspace.package]

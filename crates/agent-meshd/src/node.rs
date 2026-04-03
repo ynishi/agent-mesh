@@ -657,6 +657,44 @@ impl MeshNode {
             .await?;
         Ok(())
     }
+
+    /// Creates a `MeshNode` with a caller-supplied mesh directory, bypassing `$HOME/.mesh/` lookup.
+    ///
+    /// Unlike [`MeshNode::new`], this method does not read from the default mesh directory.
+    /// Intended for integration tests and custom deployments.
+    pub fn new_with_mesh_dir(config: NodeConfig, mesh_dir: &Path) -> Result<Self> {
+        let keypair = config.keypair()?;
+        let noise_keypair =
+            NoiseKeypair::generate().map_err(|e| anyhow::anyhow!("noise keygen: {e}"))?;
+        let config_path = config.config_path.clone();
+        let creds = MeshCredentials::load(mesh_dir).unwrap_or_default();
+        let cp_url = config.cp_url.clone().or_else(|| creds.cp_url.clone());
+        let bearer_token = creds.bearer_token.or(config.bearer_token);
+        let initial_state = if bearer_token.is_some() {
+            NodeState::Authenticated
+        } else {
+            NodeState::Started
+        };
+        Ok(MeshNode {
+            keypair: Arc::new(RwLock::new(keypair)),
+            pending_keypair: Arc::new(RwLock::new(None)),
+            relay_cancel: Arc::new(Notify::new()),
+            noise_keypair: Arc::new(noise_keypair),
+            relay_url: config.relay_url,
+            local_agent_url: config.local_agent_url,
+            acl: Arc::new(RwLock::new(config.acl)),
+            config_path,
+            cp_url,
+            state: Arc::new(RwLock::new(initial_state)),
+            bearer_token: Arc::new(RwLock::new(bearer_token)),
+            mesh_dir: mesh_dir.to_path_buf(),
+            peers: Arc::new(RwLock::new(Vec::new())),
+            revoked_keys: Arc::new(RwLock::new(HashSet::new())),
+            shared_sink: Arc::new(Mutex::new(None)),
+            shared_sessions: Arc::new(Mutex::new(HashMap::new())),
+            shared_pending: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -685,36 +723,7 @@ mod tests {
 
     /// Creates a MeshNode with a caller-supplied mesh_dir, bypassing HOME lookup.
     fn node_with_mesh_dir(cfg: NodeConfig, mesh_dir: &Path) -> Result<MeshNode> {
-        let keypair = cfg.keypair()?;
-        let noise_keypair =
-            NoiseKeypair::generate().map_err(|e| anyhow::anyhow!("noise keygen: {e}"))?;
-        let config_path = cfg.config_path.clone();
-        let creds = MeshCredentials::load(mesh_dir).unwrap_or_default();
-        let cp_url = cfg.cp_url.clone().or_else(|| creds.cp_url.clone());
-        let initial_state = if creds.bearer_token.is_some() {
-            NodeState::Authenticated
-        } else {
-            NodeState::Started
-        };
-        Ok(MeshNode {
-            keypair: Arc::new(RwLock::new(keypair)),
-            pending_keypair: Arc::new(RwLock::new(None)),
-            relay_cancel: Arc::new(Notify::new()),
-            noise_keypair: Arc::new(noise_keypair),
-            relay_url: cfg.relay_url,
-            local_agent_url: cfg.local_agent_url,
-            acl: Arc::new(RwLock::new(cfg.acl)),
-            config_path,
-            cp_url,
-            state: Arc::new(RwLock::new(initial_state)),
-            bearer_token: Arc::new(RwLock::new(creds.bearer_token)),
-            mesh_dir: mesh_dir.to_path_buf(),
-            peers: Arc::new(RwLock::new(Vec::new())),
-            revoked_keys: Arc::new(RwLock::new(HashSet::new())),
-            shared_sink: Arc::new(Mutex::new(None)),
-            shared_sessions: Arc::new(Mutex::new(HashMap::new())),
-            shared_pending: Arc::new(Mutex::new(HashMap::new())),
-        })
+        MeshNode::new_with_mesh_dir(cfg, mesh_dir)
     }
 
     #[tokio::test]

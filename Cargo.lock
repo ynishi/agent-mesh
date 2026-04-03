@@ -140,6 +140,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-mesh-tests"
+version = "0.1.0"
+dependencies = [
+ "agent-mesh-core",
+ "agent-mesh-registry",
+ "agent-mesh-relay",
+ "agent-mesh-sdk",
+ "agent-meshctl",
+ "agent-meshd",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "futures-util",
+ "hex",
+ "hyper",
+ "reqwest",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "agent-meshctl"
 version = "0.1.0"
 dependencies = [
