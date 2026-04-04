@@ -71,6 +71,10 @@ chrono = { version = "0.4", features = ["serde"] }
 # Config
 toml = "0.8"
 
+# MCP
+rmcp = { version = "1.3.0", features = ["server", "transport-streamable-http-server"] }
+schemars = "1"
+
 # Misc
 uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"
