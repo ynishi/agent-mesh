@@ -1,12 +1,9 @@
-use agent_meshctl::{commands, daemon};
+use agent_meshctl::{commands, cp_client::CpClient, daemon, DEFAULT_CP_URL};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
-
-/// Default Control Plane URL (official hosted instance).
-const DEFAULT_CP_URL: &str = "https://agent-mesh.fly.dev";
 
 #[derive(Parser)]
 #[command(name = "meshctl", about = "Agent mesh control CLI")]
@@ -238,6 +235,26 @@ async fn main() -> Result<()> {
             let url = resolve_cp_url(cp_url.as_deref())?;
             commands::login(&url).await
         }
+        Commands::Register {
+            name,
+            description,
+            capabilities,
+            secret_key,
+        } => {
+            let cp = CpClient::from_config(None)?;
+            commands::register(
+                &cp,
+                &name,
+                description.as_deref(),
+                &capabilities,
+                secret_key.as_deref(),
+            )
+            .await
+        }
+        Commands::Discover { capability, search } => {
+            let cp = CpClient::from_config(None)?;
+            commands::discover(&cp, capability.as_deref(), search.as_deref()).await
+        }
         Commands::Acl {
             subcommand:
                 AclCommands::Json {
@@ -255,24 +272,6 @@ async fn main() -> Result<()> {
                     payload,
                     timeout,
                 } => commands::request(&client, &target, &capability, &payload, timeout).await,
-                Commands::Register {
-                    name,
-                    description,
-                    capabilities,
-                    secret_key,
-                } => {
-                    commands::register(
-                        &client,
-                        &name,
-                        description.as_deref(),
-                        &capabilities,
-                        secret_key.as_deref(),
-                    )
-                    .await
-                }
-                Commands::Discover { capability, search } => {
-                    commands::discover(&client, capability.as_deref(), search.as_deref()).await
-                }
                 Commands::Status => commands::status(&client).await,
                 Commands::Revoke { reason, secret_key } => {
                     commands::revoke(&client, reason.as_deref(), secret_key.as_deref()).await
@@ -330,7 +329,10 @@ async fn main() -> Result<()> {
                     AclCommands::Json { .. } => unreachable!(),
                 },
                 // Already handled above (no meshd required)
-                Commands::Keygen | Commands::Login { .. } => unreachable!(),
+                Commands::Keygen
+                | Commands::Login { .. }
+                | Commands::Register { .. }
+                | Commands::Discover { .. } => unreachable!(),
             }
         }
     }

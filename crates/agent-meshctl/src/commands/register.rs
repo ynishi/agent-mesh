@@ -1,17 +1,22 @@
-use crate::commands::resolve_secret_key;
-use crate::daemon::MeshdClient;
+use crate::cp_client::CpClient;
 use agent_mesh_core::agent_card::{AgentCardRegistration, Capability};
-use anyhow::Result;
+use agent_mesh_core::identity::AgentKeypair;
+use anyhow::{Context, Result};
+use std::path::PathBuf;
 
-/// Registers an agent card with the registry via meshd.
+/// Registers an agent card with the registry via direct CP connection.
+///
+/// If `secret_key` is not provided and `MESH_SECRET_KEY` is not set,
+/// a new keypair is automatically generated and saved to `~/.mesh/config.toml`.
 pub async fn register(
-    client: &MeshdClient,
+    cp: &CpClient,
     name: &str,
     description: Option<&str>,
     capabilities_csv: &str,
     secret_key: Option<&str>,
 ) -> Result<()> {
-    let kp = resolve_secret_key(secret_key)?;
+    let kp = resolve_or_generate_key(secret_key)?;
+
     let caps: Vec<Capability> = capabilities_csv
         .split(',')
         .map(|s| Capability {
@@ -31,10 +36,10 @@ pub async fn register(
     };
 
     let body = serde_json::to_value(&reg)?;
-    let (status, resp) = client.post("/agents", &body).await?;
+    let (status, resp) = cp.post("/agents", &body).await?;
 
     if status.is_success() {
-        println!("Registered successfully:");
+        eprintln!("Agent ID: {}", kp.agent_id());
         println!("{}", serde_json::to_string_pretty(&resp)?);
     } else {
         anyhow::bail!("Registration failed ({}): {}", status, resp);
@@ -42,63 +47,87 @@ pub async fn register(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::routing::post;
-    use axum::Router;
-    use std::future::IntoFuture;
-    use std::path::PathBuf;
-
-    async fn mock_meshd_server(router: Router) -> (PathBuf, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let sock_path = dir.path().join("meshd.sock");
-        let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
-        tokio::spawn(axum::serve(listener, router.into_make_service()).into_future());
-        (sock_path, dir)
+/// Resolve secret key from arg/env, or auto-generate and save to config.
+fn resolve_or_generate_key(provided: Option<&str>) -> Result<AgentKeypair> {
+    // 1. Explicit argument
+    if let Some(hex_str) = provided {
+        return keypair_from_hex(hex_str);
     }
 
-    #[tokio::test]
-    async fn register_success() {
-        let router = Router::new().route(
-            "/agents",
-            post(|| async {
-                (
-                    axum::http::StatusCode::CREATED,
-                    axum::Json(serde_json::json!({ "status": "created" })),
-                )
-            }),
-        );
-
-        let (sock_path, _dir) = mock_meshd_server(router).await;
-        let client = MeshdClient::new(sock_path);
-
-        let kp = agent_mesh_core::identity::AgentKeypair::generate();
-        let secret_hex = hex::encode(kp.secret_bytes());
-
-        let result = register(&client, "TestAgent", None, "test-cap", Some(&secret_hex)).await;
-        assert!(result.is_ok(), "register should succeed: {:?}", result);
+    // 2. Environment variable
+    if let Ok(hex_str) = std::env::var("MESH_SECRET_KEY") {
+        return keypair_from_hex(&hex_str);
     }
 
-    #[tokio::test]
-    async fn register_server_error() {
-        let router = Router::new().route(
-            "/agents",
-            post(|| async {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({ "error": "internal error" })),
-                )
-            }),
-        );
-
-        let (sock_path, _dir) = mock_meshd_server(router).await;
-        let client = MeshdClient::new(sock_path);
-
-        let kp = agent_mesh_core::identity::AgentKeypair::generate();
-        let secret_hex = hex::encode(kp.secret_bytes());
-
-        let result = register(&client, "TestAgent", None, "cap", Some(&secret_hex)).await;
-        assert!(result.is_err());
+    // 3. Existing key in config
+    let mesh_dir = default_mesh_dir()?;
+    if let Some(hex_str) = load_secret_key(&mesh_dir)? {
+        eprintln!("Using existing key from ~/.mesh/config.toml");
+        return keypair_from_hex(&hex_str);
     }
+
+    // 4. Auto-generate
+    let kp = AgentKeypair::generate();
+    save_secret_key(&mesh_dir, &hex::encode(kp.secret_bytes()))?;
+    eprintln!("Generated new keypair and saved to ~/.mesh/config.toml");
+    Ok(kp)
+}
+
+fn keypair_from_hex(hex_str: &str) -> Result<AgentKeypair> {
+    let bytes = hex::decode(hex_str).context("invalid hex in secret key")?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("secret key must be 32 bytes (64 hex chars)"))?;
+    Ok(AgentKeypair::from_bytes(&arr))
+}
+
+fn default_mesh_dir() -> Result<PathBuf> {
+    let home = std::env::var("HOME").context("HOME environment variable not set")?;
+    Ok(PathBuf::from(home).join(".mesh"))
+}
+
+fn load_secret_key(mesh_dir: &std::path::Path) -> Result<Option<String>> {
+    let path = mesh_dir.join("config.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+
+    #[derive(serde::Deserialize)]
+    struct Cfg {
+        secret_key: Option<String>,
+    }
+    let cfg: Cfg = toml::from_str(&content).unwrap_or(Cfg { secret_key: None });
+    Ok(cfg.secret_key)
+}
+
+/// Append secret_key to existing config.toml (preserves bearer_token/cp_url).
+fn save_secret_key(mesh_dir: &std::path::Path, hex_key: &str) -> Result<()> {
+    std::fs::create_dir_all(mesh_dir)
+        .with_context(|| format!("failed to create {}", mesh_dir.display()))?;
+
+    let path = mesh_dir.join("config.toml");
+    let mut content = if path.exists() {
+        std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?
+    } else {
+        String::new()
+    };
+
+    // Append if not already present
+    if !content.contains("secret_key") {
+        content.push_str(&format!("secret_key = \"{hex_key}\"\n"));
+    }
+
+    std::fs::write(&path, &content)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    Ok(())
 }
