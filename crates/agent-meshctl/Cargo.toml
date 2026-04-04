@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-mcp-server = ["dep:rmcp", "dep:schemars"]
+mcp-server = ["dep:rmcp", "dep:schemars", "dep:axum"]
 
 [dependencies]
 agent-mesh-core = { workspace = true }
@@ -38,8 +38,10 @@ http-body-util = "0.1"
 bytes = "1"
 rmcp = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
 
 [dev-dependencies]
 axum = { workspace = true }
 chrono = { workspace = true }
 tempfile = "3"
+tower = { workspace = true }
