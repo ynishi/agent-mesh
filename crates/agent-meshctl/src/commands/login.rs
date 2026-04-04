@@ -115,8 +115,6 @@ fn save_credentials(api_token: &str, cp_url: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn save_credentials_creates_file() {
         let dir = tempfile::tempdir().expect("tempdir");
