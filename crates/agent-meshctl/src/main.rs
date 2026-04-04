@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
+/// Default Control Plane URL (official hosted instance).
+const DEFAULT_CP_URL: &str = "https://agent-mesh.fly.dev";
+
 #[derive(Parser)]
 #[command(name = "meshctl", about = "Agent mesh control CLI")]
 struct Cli {
@@ -22,9 +25,9 @@ enum Commands {
     Keygen,
     /// Log in to the control plane via OAuth Device Flow.
     Login {
-        /// Control plane URL.
+        /// Control plane URL (default: official hosted instance, or value from ~/.mesh/config.toml).
         #[arg(long)]
-        cp_url: String,
+        cp_url: Option<String>,
     },
     /// Register an agent card with the registry.
     Register {
@@ -242,7 +245,10 @@ async fn main() -> Result<()> {
         _ => {
             let client = daemon::ensure_meshd(sock_path).await?;
             match cli.command {
-                Commands::Login { cp_url } => commands::login(&client, &cp_url).await,
+                Commands::Login { cp_url } => {
+                    let url = resolve_cp_url(cp_url.as_deref())?;
+                    commands::login(&client, &url).await
+                }
                 Commands::Request {
                     target,
                     capability,
@@ -338,6 +344,18 @@ struct MeshCredentials {
 }
 
 impl MeshCredentials {
+    fn load(mesh_dir: &std::path::Path) -> Result<Self> {
+        let path = mesh_dir.join("config.toml");
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let creds: Self =
+            toml::from_str(&content).with_context(|| "failed to parse ~/.mesh/config.toml")?;
+        Ok(creds)
+    }
+
     fn save(&self, mesh_dir: &std::path::Path) -> Result<()> {
         std::fs::create_dir_all(mesh_dir)
             .with_context(|| format!("failed to create dir {}", mesh_dir.display()))?;
@@ -355,6 +373,29 @@ impl MeshCredentials {
 
         Ok(())
     }
+
+    fn default_mesh_dir() -> Result<PathBuf> {
+        let home = std::env::var("HOME").context("HOME environment variable not set")?;
+        Ok(PathBuf::from(home).join(".mesh"))
+    }
+}
+
+/// Resolves the Control Plane URL with fallback chain:
+/// 1. Explicit CLI argument
+/// 2. `cp_url` from `~/.mesh/config.toml`
+/// 3. `DEFAULT_CP_URL` (official hosted instance)
+fn resolve_cp_url(provided: Option<&str>) -> Result<String> {
+    if let Some(url) = provided {
+        return Ok(url.to_string());
+    }
+
+    let mesh_dir = MeshCredentials::default_mesh_dir()?;
+    let creds = MeshCredentials::load(&mesh_dir)?;
+    if let Some(url) = creds.cp_url {
+        return Ok(url);
+    }
+
+    Ok(DEFAULT_CP_URL.to_string())
 }
 
 /// Registers an agent using a setup key and saves the issued API token.

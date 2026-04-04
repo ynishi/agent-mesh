@@ -1,0 +1,12 @@
+target
+.worktrees
+.worktree
+workspace
+.git
+.gitignore
+.claude
+.ryo
+*.db
+*.md
+!crates/**/README.md
+docs

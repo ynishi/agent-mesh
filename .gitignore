@@ -5,3 +5,4 @@ workspace
 .ryo
 .claude
 *.db
+.env
