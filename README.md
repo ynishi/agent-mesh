@@ -103,23 +103,64 @@ agent-meshctl discover
 
 ### Send requests between agents
 
-```bash
-# Terminal 1: Start your agent's local HTTP server (any server that accepts POST and returns JSON)
-python3 scripts/echo_server.py 9000 my-agent
+This walkthrough connects two agents (Alice and Bob) through the hosted relay. Each agent needs its own keypair, meshd process, and a local HTTP server that handles requests.
 
-# Terminal 2: Connect to the relay
+**1. Register both agents**
+
+```bash
+# Alice (uses the key already saved in ~/.mesh/config.toml from the register above)
+agent-meshctl register --name "alice" --capabilities "chat"
+# → Agent ID: <ALICE_ID>   (printed to stderr)
+
+# Bob (generate a new keypair explicitly)
+agent-meshctl keygen
+# → Agent ID:   <BOB_ID>
+# → Secret Key: <BOB_SECRET>
+agent-meshctl register --name "bob" --capabilities "echo" --secret-key <BOB_SECRET>
+```
+
+**2. Start local HTTP servers** (any server that accepts POST and returns JSON)
+
+```bash
+# Terminal 1: Alice's agent server
+python3 scripts/echo_server.py 9001 alice
+
+# Terminal 2: Bob's agent server
+python3 scripts/echo_server.py 9002 bob
+```
+
+**3. Start meshd for each agent**
+
+Each meshd maintains a WebSocket connection to the relay and proxies incoming requests to the local HTTP server. The secret key can be found in `~/.mesh/config.toml` (auto-saved on register).
+
+```bash
+# Terminal 3: Alice's meshd
 agent-meshd \
   --relay wss://agent-mesh.fly.dev/relay/ws \
-  --local-agent http://127.0.0.1:9000 \
-  --secret-key <SECRET_KEY> \
+  --local-agent http://127.0.0.1:9001 \
+  --secret-key <ALICE_SECRET> \
   --cp-url https://agent-mesh.fly.dev
 
-# Terminal 3: Send a request to another agent
-agent-meshctl request \
-  --target <TARGET_AGENT_ID> \
-  --capability echo \
-  --payload '{"message": "hello"}'
+# Terminal 4: Bob's meshd
+agent-meshd \
+  --relay wss://agent-mesh.fly.dev/relay/ws \
+  --local-agent http://127.0.0.1:9002 \
+  --secret-key <BOB_SECRET> \
+  --cp-url https://agent-mesh.fly.dev
 ```
+
+**4. Send a request**
+
+```bash
+# Terminal 5: Alice sends a request to Bob
+agent-meshctl request \
+  --target <BOB_ID> \
+  --capability echo \
+  --payload '{"message": "hello from alice"}'
+# → {"agent": "bob", "echo": {"capability": "echo", "message": "hello from alice"}}
+```
+
+The request flows: `meshctl → Alice's meshd → [Noise_XX handshake] → Relay → Bob's meshd → Bob's HTTP server → encrypted response back`.
 
 ### Self-hosting
 
