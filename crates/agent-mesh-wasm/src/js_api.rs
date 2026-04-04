@@ -23,6 +23,16 @@ pub struct MeshClient {
 
 #[wasm_bindgen]
 impl MeshClient {
+    /// Derive agent ID from a secret key without connecting.
+    ///
+    /// Useful for registering the agent with the CP before relay connection.
+    #[wasm_bindgen(js_name = "deriveAgentId")]
+    pub fn derive_agent_id(secret_key_hex: &str) -> Result<String, JsError> {
+        let secret_bytes = hex_to_bytes(secret_key_hex)?;
+        let keypair = AgentKeypair::from_bytes(&secret_bytes);
+        Ok(keypair.agent_id().as_str().to_string())
+    }
+
     /// Connect to the relay with a secret key (hex-encoded Ed25519 signing key).
     ///
     /// Returns a connected, authenticated MeshClient.

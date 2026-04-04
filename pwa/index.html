@@ -51,6 +51,7 @@
       cursor: pointer;
       font-size: 0.85rem;
       margin-right: 0.5rem;
+      margin-bottom: 0.5rem;
     }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     button.secondary { background: #533483; }
@@ -80,6 +81,25 @@
     .log-error { color: #ff6b6b; }
     .log-send { color: #6bb5ff; }
     .log-recv { color: #ffd93d; }
+
+    .user-code {
+      font-size: 1.5rem;
+      font-weight: bold;
+      color: #e94560;
+      text-align: center;
+      padding: 0.75rem;
+      background: #16213e;
+      border-radius: 4px;
+      letter-spacing: 0.3rem;
+      margin: 0.5rem 0;
+    }
+    .hidden { display: none; }
+    .step-label {
+      font-size: 0.75rem;
+      color: #888;
+      margin-bottom: 0.25rem;
+    }
+    a { color: #6bb5ff; }
   </style>
 </head>
 <body>
@@ -89,30 +109,53 @@
   </header>
 
   <main>
-    <div id="status" class="status-disconnected">Disconnected</div>
+    <div id="status" class="status-disconnected">Not logged in</div>
 
-    <div class="section">
-      <h2>Connection</h2>
-      <label for="relay-url">Relay URL</label>
-      <input id="relay-url" value="wss://agent-mesh.fly.dev/relay/ws">
-      <label for="secret-key">Secret Key (hex) — from <code>meshctl register</code> or <code>~/.mesh/config.toml</code></label>
-      <input id="secret-key" placeholder="64 hex chars (registered agent key)">
-      <button id="btn-connect" onclick="doConnect()">Connect</button>
+    <!-- Step 1: Login -->
+    <div id="login-section" class="section">
+      <h2>Login</h2>
+      <label for="cp-url">Server URL</label>
+      <input id="cp-url" value="https://agent-mesh.fly.dev">
+      <button id="btn-login" onclick="doLogin()">Login with GitHub</button>
+      <button class="secondary" onclick="toggleManual()">Use Secret Key</button>
+
+      <!-- Device Flow UI (shown during login) -->
+      <div id="device-flow" class="hidden">
+        <p class="step-label">Open the link and enter the code:</p>
+        <div class="user-code" id="user-code"></div>
+        <p style="text-align:center; margin: 0.5rem 0;">
+          <a id="verify-link" href="#" target="_blank">Open GitHub</a>
+        </p>
+        <p class="step-label" id="poll-status">Waiting for authorization...</p>
+      </div>
+
+      <!-- Manual key input (toggled) -->
+      <div id="manual-section" class="hidden">
+        <label for="relay-url">Relay URL</label>
+        <input id="relay-url" value="wss://agent-mesh.fly.dev/relay/ws">
+        <label for="secret-key">Secret Key (hex)</label>
+        <input id="secret-key" placeholder="64 hex chars from ~/.mesh/config.toml">
+        <button onclick="doManualConnect()">Connect</button>
+      </div>
     </div>
 
-    <div class="section">
-      <h2>Agent Info</h2>
+    <!-- Step 2: Agent (shown after login) -->
+    <div id="agent-section" class="section hidden">
+      <h2>Agent</h2>
       <label>Agent ID</label>
       <input id="agent-id" readonly placeholder="(not connected)">
+      <label>Secret Key (save this!)</label>
+      <input id="agent-secret" readonly>
     </div>
 
-    <div class="section">
+    <!-- Step 3: Send Request -->
+    <div id="request-section" class="section hidden">
       <h2>Send Request</h2>
       <label for="target-id">Target Agent ID</label>
       <input id="target-id" placeholder="base64url-encoded Ed25519 public key">
       <label for="payload">Payload (JSON)</label>
       <textarea id="payload">{"capability": "echo", "message": "hello from PWA"}</textarea>
-      <button id="btn-send" onclick="doRequest()" disabled>Send Request</button>
+      <button id="btn-send" onclick="doRequest()">Send Request</button>
     </div>
 
     <div class="section">
@@ -125,6 +168,8 @@
     import init, { MeshClient } from './pkg/agent_mesh_wasm.js';
 
     let client = null;
+    let apiToken = null;
+    let wasmReady = false;
 
     window.log = function(msg, cls = 'log-info') {
       const el = document.getElementById('log');
@@ -139,25 +184,201 @@
       el.className = cls;
     }
 
-    window.doConnect = async function() {
+    function cpUrl() {
+      return document.getElementById('cp-url').value.replace(/\/+$/, '');
+    }
+
+    function relayUrlFromCp(cp) {
+      return cp.replace(/^http/, 'ws') + '/relay/ws';
+    }
+
+    // -- Hex helpers --
+    function hexEncode(bytes) {
+      return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    // -- Ed25519 key generation (via WASM / Web Crypto is not Ed25519) --
+    // We generate 32 random bytes as the secret key.
+    // Ed25519 derivation happens inside the WASM module.
+    function generateSecretKey() {
+      const bytes = new Uint8Array(32);
+      crypto.getRandomValues(bytes);
+      return hexEncode(bytes);
+    }
+
+    // Derive agent_id from secret key using WASM.
+    // We connect briefly just to get the agent_id... but actually
+    // we can derive it by creating a MeshClient. Instead, we'll
+    // use a simpler approach: register with CP, then connect.
+    // The agent_id is returned by the register API.
+
+    // -- Toggle manual key input --
+    window.toggleManual = function() {
+      document.getElementById('manual-section').classList.toggle('hidden');
+      document.getElementById('device-flow').classList.add('hidden');
+    };
+
+    // -- Device Flow Login --
+    window.doLogin = async function() {
+      const cp = cpUrl();
+      const btnLogin = document.getElementById('btn-login');
+      btnLogin.disabled = true;
+
       try {
-        await init();
+        log('Starting GitHub Device Flow...');
+
+        // 1. Start device flow
+        const deviceResp = await fetch(`${cp}/oauth/device`, { method: 'POST' });
+        if (!deviceResp.ok) {
+          const text = await deviceResp.text();
+          throw new Error(`Device flow failed: ${deviceResp.status} ${text}`);
+        }
+        const device = await deviceResp.json();
+
+        // 2. Show user code + verification URL
+        document.getElementById('device-flow').classList.remove('hidden');
+        document.getElementById('user-code').textContent = device.user_code;
+        const verifyLink = document.getElementById('verify-link');
+        verifyLink.href = device.verification_uri;
+        verifyLink.textContent = device.verification_uri;
+
+        log(`Code: ${device.user_code} — open ${device.verification_uri}`);
+
+        // Open verification URL in new tab
+        window.open(device.verification_uri, '_blank');
+
+        // 3. Poll for token
+        const interval = (device.interval || 5) * 1000;
+        const deadline = Date.now() + (device.expires_in || 300) * 1000;
+
+        while (Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, interval));
+
+          const tokenResp = await fetch(`${cp}/oauth/token`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_code: device.device_code }),
+          });
+          const tokenData = await tokenResp.json();
+
+          if (tokenData.error) {
+            if (tokenData.error === 'authorization_pending' || tokenData.error === 'slow_down') {
+              document.getElementById('poll-status').textContent = 'Waiting for authorization...';
+              continue;
+            }
+            throw new Error(`OAuth error: ${tokenData.error}`);
+          }
+
+          if (tokenData.api_token) {
+            apiToken = tokenData.api_token;
+            log('Login successful!');
+            document.getElementById('device-flow').classList.add('hidden');
+
+            // 4. Auto-register agent + connect to relay
+            await autoRegisterAndConnect(cp);
+            return;
+          }
+        }
+        throw new Error('Login timed out');
+
+      } catch (e) {
+        log(`Error: ${e.message || e}`, 'log-error');
+        setStatus('Login failed', 'status-disconnected');
+      } finally {
+        btnLogin.disabled = false;
+      }
+    };
+
+    // -- Auto register + connect --
+    async function autoRegisterAndConnect(cp) {
+      try {
+        setStatus('Registering agent...', 'status-connecting');
+
+        // Generate Ed25519 keypair (secret key)
+        const secretKeyHex = generateSecretKey();
+
+        // We need the agent_id to register. Initialize WASM and derive it.
+        if (!wasmReady) { await init(); wasmReady = true; }
+
+        // Temporarily connect to derive agent_id — but we can't connect
+        // without being registered. So we need to derive agent_id from
+        // the secret key without connecting.
+        // Use the WASM MeshClient's internal keygen... but it requires relay.
+        // Instead: create a temporary internal derivation.
+        // Actually, we'll add a static method to MeshClient for this.
+
+        // For now: use the MeshClientWithKey approach — generate and
+        // compute agent_id client-side by using nacl or tweetnacl.
+        // Since we already have WASM with Ed25519, let's export a helper.
+
+        const agentId = MeshClient.deriveAgentId(secretKeyHex);
+
+        log(`Generated agent: ${agentId.substring(0, 16)}...`);
+
+        // Register with CP
+        const regResp = await fetch(`${cp}/agents`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiToken}`,
+          },
+          body: JSON.stringify({
+            agent_id: agentId,
+            name: 'pwa-agent',
+            capabilities: [{ name: 'chat' }],
+          }),
+        });
+        if (!regResp.ok) {
+          const text = await regResp.text();
+          throw new Error(`Register failed: ${regResp.status} ${text}`);
+        }
+        const card = await regResp.json();
+        log(`Registered: ${card.name} (${card.id})`);
+
+        // Connect to relay
+        const relayUrl = relayUrlFromCp(cp);
+        log(`Connecting to ${relayUrl}...`);
+        setStatus('Connecting to relay...', 'status-connecting');
+
+        client = await MeshClient.connect(secretKeyHex, relayUrl);
+        const confirmedId = client.agentId();
+
+        document.getElementById('agent-id').value = confirmedId;
+        document.getElementById('agent-secret').value = secretKeyHex;
+        document.getElementById('agent-section').classList.remove('hidden');
+        document.getElementById('request-section').classList.remove('hidden');
+        document.getElementById('login-section').classList.add('hidden');
+        setStatus(`Connected as ${confirmedId.substring(0, 12)}...`, 'status-connected');
+        log(`Connected! Agent ID: ${confirmedId}`);
+
+      } catch (e) {
+        log(`Error: ${e.message || e}`, 'log-error');
+        setStatus('Registration failed', 'status-disconnected');
+      }
+    }
+
+    // -- Manual connect (existing flow) --
+    window.doManualConnect = async function() {
+      try {
+        if (!wasmReady) { await init(); wasmReady = true; }
         const relayUrl = document.getElementById('relay-url').value;
         const secretKey = document.getElementById('secret-key').value.trim();
+
+        if (!secretKey) {
+          log('Secret key is required.', 'log-error');
+          return;
+        }
 
         setStatus('Connecting...', 'status-connecting');
         log(`Connecting to ${relayUrl}...`);
 
-        if (!secretKey) {
-          log('Secret key is required. Use a key from: meshctl register or ~/.mesh/config.toml', 'log-error');
-          setStatus('Disconnected', 'status-disconnected');
-          return;
-        }
         client = await MeshClient.connect(secretKey, relayUrl);
-
         const agentId = client.agentId();
         document.getElementById('agent-id').value = agentId;
-        document.getElementById('btn-send').disabled = false;
+        document.getElementById('agent-secret').value = secretKey;
+        document.getElementById('agent-section').classList.remove('hidden');
+        document.getElementById('request-section').classList.remove('hidden');
+        document.getElementById('login-section').classList.add('hidden');
         setStatus(`Connected as ${agentId.substring(0, 12)}...`, 'status-connected');
         log(`Authenticated. Agent ID: ${agentId}`);
       } catch (e) {
@@ -166,6 +387,7 @@
       }
     };
 
+    // -- Send Request --
     window.doRequest = async function() {
       if (!client) { log('Not connected', 'log-error'); return; }
       try {
@@ -174,11 +396,11 @@
 
         if (!targetId) { log('Target Agent ID is required', 'log-error'); return; }
 
-        log(`→ Sending to ${targetId.substring(0, 12)}...`, 'log-send');
+        log(`\u2192 Sending to ${targetId.substring(0, 12)}...`, 'log-send');
         log(`  Payload: ${payload}`, 'log-send');
 
         const response = await client.request(targetId, payload);
-        log(`← Response: ${response}`, 'log-recv');
+        log(`\u2190 Response: ${response}`, 'log-recv');
       } catch (e) {
         log(`Error: ${e.message || e}`, 'log-error');
       }

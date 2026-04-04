@@ -6,6 +6,7 @@ use agent_mesh_relay::hub::Hub;
 use agent_mesh_relay::GateVerifier;
 use async_trait::async_trait;
 use clap::Parser;
+use tower_http::cors::{Any, CorsLayer};
 
 #[derive(Parser)]
 #[command(
@@ -87,9 +88,15 @@ async fn main() -> anyhow::Result<()> {
     let cp_router = agent_mesh_registry::app(cp_state);
     let relay_router = agent_mesh_relay::app(Arc::clone(&hub));
 
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     let app = axum::Router::new()
         .nest("/relay", relay_router)
-        .merge(cp_router);
+        .merge(cp_router)
+        .layer(cors);
 
     // 6. Start server.
     let listener = tokio::net::TcpListener::bind(&cli.listen).await?;

@@ -1,4 +1,4 @@
-const CACHE = 'agent-mesh-v1';
+const CACHE = 'agent-mesh-v2';
 const ASSETS = [
   './',
   './index.html',
