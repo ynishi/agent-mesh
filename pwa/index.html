@@ -100,6 +100,21 @@
       margin-bottom: 0.25rem;
     }
     a { color: #6bb5ff; }
+    .agent-card {
+      background: #16213e;
+      border: 1px solid #0f3460;
+      border-radius: 4px;
+      padding: 0.5rem 0.75rem;
+      margin-bottom: 0.4rem;
+      cursor: pointer;
+      font-size: 0.8rem;
+      transition: border-color 0.15s;
+    }
+    .agent-card:hover { border-color: #e94560; }
+    .agent-card .agent-name { color: #e94560; font-weight: bold; }
+    .agent-card .agent-caps { color: #888; font-size: 0.7rem; }
+    .agent-card .agent-aid { color: #6bb5ff; font-family: monospace; font-size: 0.7rem; }
+    .agent-card.self { opacity: 0.5; cursor: default; }
   </style>
 </head>
 <body>
@@ -145,10 +160,19 @@
       <label>Agent ID</label>
       <input id="agent-id" readonly placeholder="(not connected)">
       <label>Secret Key (save this!)</label>
-      <input id="agent-secret" readonly>
+      <div style="display:flex; gap:0.25rem; align-items:center;">
+        <input id="agent-secret" type="password" readonly style="flex:1;">
+        <button class="secondary" onclick="copySecret()" style="margin:0; white-space:nowrap;">Copy</button>
+      </div>
     </div>
 
-    <!-- Step 3: Send Request -->
+    <!-- Step 3: Agents list -->
+    <div id="agents-section" class="section hidden">
+      <h2>Agents <button class="secondary" onclick="loadAgents()" style="font-size:0.75rem; padding:0.2rem 0.5rem;">Refresh</button></h2>
+      <div id="agents-list" style="max-height:200px; overflow-y:auto;"></div>
+    </div>
+
+    <!-- Step 4: Send Request -->
     <div id="request-section" class="section hidden">
       <h2>Send Request</h2>
       <label for="target-id">Target Agent ID</label>
@@ -176,6 +200,14 @@
       const time = new Date().toLocaleTimeString();
       el.innerHTML += `<span class="${cls}">[${time}] ${msg}</span>\n`;
       el.scrollTop = el.scrollHeight;
+    };
+
+    window.copySecret = function() {
+      const el = document.getElementById('agent-secret');
+      navigator.clipboard.writeText(el.value).then(
+        () => log('Secret key copied to clipboard'),
+        () => log('Failed to copy', 'log-error')
+      );
     };
 
     function setStatus(text, cls) {
@@ -242,10 +274,7 @@
         verifyLink.href = device.verification_uri;
         verifyLink.textContent = device.verification_uri;
 
-        log(`Code: ${device.user_code} — open ${device.verification_uri}`);
-
-        // Open verification URL in new tab
-        window.open(device.verification_uri, '_blank');
+        log(`Code: ${device.user_code} — click the link to open GitHub`);
 
         // 3. Poll for token
         const interval = (device.interval || 5) * 1000;
@@ -346,10 +375,13 @@
         document.getElementById('agent-id').value = confirmedId;
         document.getElementById('agent-secret').value = secretKeyHex;
         document.getElementById('agent-section').classList.remove('hidden');
+        document.getElementById('agents-section').classList.remove('hidden');
         document.getElementById('request-section').classList.remove('hidden');
         document.getElementById('login-section').classList.add('hidden');
         setStatus(`Connected as ${confirmedId.substring(0, 12)}...`, 'status-connected');
         log(`Connected! Agent ID: ${confirmedId}`);
+
+        loadAgents();
 
       } catch (e) {
         log(`Error: ${e.message || e}`, 'log-error');
@@ -385,6 +417,47 @@
         setStatus('Connection failed', 'status-disconnected');
         log(`Error: ${e.message || e}`, 'log-error');
       }
+    };
+
+    // -- Load agents list --
+    window.loadAgents = async function() {
+      if (!apiToken) { log('Not logged in (no API token)', 'log-error'); return; }
+      try {
+        const cp = cpUrl();
+        const resp = await fetch(`${cp}/agents`, {
+          headers: { 'Authorization': `Bearer ${apiToken}` },
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          log(`Failed to list agents: ${resp.status} ${text}`, 'log-error');
+          return;
+        }
+        const agents = await resp.json();
+        const myAgentId = client ? client.agentId() : '';
+        const container = document.getElementById('agents-list');
+        if (agents.length === 0) {
+          container.innerHTML = '<p style="color:#888; font-size:0.8rem;">No agents found in your group.</p>';
+          return;
+        }
+        container.innerHTML = agents.map(a => {
+          const isSelf = a.agent_id === myAgentId;
+          const caps = (a.capabilities || []).map(c => c.name).join(', ') || 'none';
+          const desc = a.description ? ` — ${a.description}` : '';
+          return `<div class="agent-card${isSelf ? ' self' : ''}" ${isSelf ? '' : `onclick="selectAgent('${a.agent_id}')"`}>
+            <span class="agent-name">${a.name}</span>${desc}${isSelf ? ' <span style="color:#888;">(you)</span>' : ''}
+            <div class="agent-aid">${a.agent_id}</div>
+            <div class="agent-caps">${caps}</div>
+          </div>`;
+        }).join('');
+        log(`Loaded ${agents.length} agent(s)`);
+      } catch (e) {
+        log(`Error listing agents: ${e.message || e}`, 'log-error');
+      }
+    };
+
+    window.selectAgent = function(agentId) {
+      document.getElementById('target-id').value = agentId;
+      log(`Selected target: ${agentId.substring(0, 16)}...`);
     };
 
     // -- Send Request --

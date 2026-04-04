@@ -22,11 +22,26 @@ self.addEventListener('activate', (e) => {
 });
 
 self.addEventListener('fetch', (e) => {
-  // Network-first for API, cache-first for assets
-  if (e.request.url.includes('/relay/') || e.request.url.includes('/agents')) {
+  // Skip non-GET and API/relay requests (let them go straight to network).
+  if (e.request.method !== 'GET') return;
+  if (e.request.url.includes('/relay/') || e.request.url.includes('/agents') || e.request.url.includes('/oauth/')) {
     return;
   }
+
+  // Stale-while-revalidate: serve from cache immediately, then update cache
+  // in the background. This ensures WASM binary updates are picked up on
+  // the next page load without requiring a manual cache version bump.
   e.respondWith(
-    caches.match(e.request).then((r) => r || fetch(e.request))
+    caches.open(CACHE).then((cache) =>
+      cache.match(e.request).then((cached) => {
+        const fetched = fetch(e.request).then((response) => {
+          if (response.ok) {
+            cache.put(e.request, response.clone());
+          }
+          return response;
+        });
+        return cached || fetched;
+      })
+    )
   );
 });

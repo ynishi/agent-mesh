@@ -221,14 +221,15 @@ pub async fn exchange_token(
         )
     })?;
 
-    // Issue a new API token.
+    // Issue a new API token with 24-hour expiry.
     let raw_token = uuid::Uuid::new_v4().to_string();
     let token_hash = hash_token(&raw_token);
+    let now = chrono::Utc::now();
     let api_token = ApiToken {
         token_hash,
         user_id: user.id,
-        created_at: chrono::Utc::now(),
-        expires_at: None,
+        created_at: now,
+        expires_at: Some(now + chrono::Duration::hours(24)),
     };
     state.db.create_api_token(&api_token).map_err(|e| {
         (

@@ -6,7 +6,7 @@ use agent_mesh_relay::hub::Hub;
 use agent_mesh_relay::GateVerifier;
 use async_trait::async_trait;
 use clap::Parser;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 #[derive(Parser)]
 #[command(
@@ -29,6 +29,9 @@ struct Cli {
     /// OAuth client secret.
     #[arg(long, env = "OAUTH_CLIENT_SECRET")]
     oauth_client_secret: Option<String>,
+    /// Allowed CORS origins (comma-separated). Defaults to allow-all if unset.
+    #[arg(long, env = "CORS_ORIGINS")]
+    cors_origins: Option<String>,
 }
 
 /// In-process gate verifier: resolves agent_id → group_id via direct DB access.
@@ -88,10 +91,22 @@ async fn main() -> anyhow::Result<()> {
     let cp_router = agent_mesh_registry::app(cp_state);
     let relay_router = agent_mesh_relay::app(Arc::clone(&hub));
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = match cli.cors_origins {
+        Some(ref origins) => {
+            let allowed: Vec<_> = origins
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(allowed))
+                .allow_methods(Any)
+                .allow_headers(Any)
+        }
+        None => CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any),
+    };
 
     let app = axum::Router::new()
         .nest("/relay", relay_router)

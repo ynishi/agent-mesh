@@ -173,6 +173,9 @@ impl WasmMeshClient {
 
     // -- Internal helpers --
 
+    // WASM is single-threaded: RefCell borrows across await cannot cause
+    // concurrent re-entry. The lint is suppressed with an explicit safety note.
+    #[allow(clippy::await_holding_refcell_ref)]
     async fn send_envelope(&self, envelope: &MeshEnvelope) -> Result<(), WasmSdkError> {
         let json =
             serde_json::to_string(envelope).map_err(|e| WasmSdkError::Protocol(e.to_string()))?;
@@ -183,11 +186,15 @@ impl WasmMeshClient {
             .map_err(|e| WasmSdkError::Send(e.to_string()))
     }
 
+    /// Maximum number of messages to skip before giving up.
+    const RECV_MAX_ATTEMPTS: usize = 256;
+
+    #[allow(clippy::await_holding_refcell_ref)]
     async fn receive_envelope_matching(
         &self,
         expected_reply_to: MessageId,
     ) -> Result<MeshEnvelope, WasmSdkError> {
-        loop {
+        for _ in 0..Self::RECV_MAX_ATTEMPTS {
             let msg = self.stream.borrow_mut().next().await;
             match msg {
                 Some(Ok(Message::Text(text))) => {
@@ -206,6 +213,7 @@ impl WasmMeshClient {
                 _ => {}
             }
         }
+        Err(WasmSdkError::Timeout)
     }
 }
 
