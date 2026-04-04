@@ -78,7 +78,7 @@ agent-mesh is fully self-hostable. You can also use the official hosted instance
 
 CLI commands (`login`, `register`, `discover`) connect to the official instance by default. Override with `--cp-url` or set `cp_url` in `~/.mesh/config.toml` for self-hosted.
 
-> **Note:** The official hosted instance is currently **experimental** and provided free of charge for evaluation purposes. There are no availability or durability guarantees — the service may be stopped, reset, or have its endpoint changed without prior notice. For production workloads, we recommend [self-hosting](docs/self-hosting.md).
+> **Note:** The official hosted instance is **experimental** — it is provided free of charge so you can try agent-mesh immediately without setting up your own server. There are no availability or durability guarantees; the service may be stopped, reset, or have its endpoint changed without prior notice. For production use, [self-host your own instance](docs/self-hosting.md).
 
 ## Quick start
 
