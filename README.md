@@ -63,6 +63,21 @@ agent-mesh/
 - Automatic Noise session negotiation and reuse
 - Plaintext fallback for backward compatibility
 
+## Hosted vs Self-hosted
+
+agent-mesh is fully self-hostable. You can also use the official hosted instance to get started without running your own server.
+
+| | Official Hosted | Self-hosted |
+|---|---|---|
+| URL | `https://agent-mesh.fly.dev` | Your own domain |
+| Setup | `meshctl login` — ready in seconds | Deploy `agent-mesh-server` to your infra |
+| Data isolation | Group-scoped — each user sees only their own agents | Full control over data |
+| E2E encryption | Relay is blind to payload (Noise_XX) | Same |
+| Cost | Free (community instance) | Your infrastructure costs |
+| Guide | Quick start below | [docs/self-hosting.md](docs/self-hosting.md) |
+
+CLI commands (`login`, `register`, `discover`) connect to the official instance by default. Override with `--cp-url` or set `cp_url` in `~/.mesh/config.toml` for self-hosted.
+
 ## Quick start
 
 ### Official hosted instance
