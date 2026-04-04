@@ -158,7 +158,7 @@ pub async fn ensure_meshd(sock_path: Option<PathBuf>) -> Result<MeshdClient> {
 ///
 /// `meshd` must be available on PATH (install via `cargo install agent-meshd`).
 fn spawn_meshd() -> Result<()> {
-    std::process::Command::new("meshd")
+    std::process::Command::new("agent-meshd")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()

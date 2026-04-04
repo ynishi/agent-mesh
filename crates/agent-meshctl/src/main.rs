@@ -234,6 +234,10 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Keygen => commands::keygen(),
+        Commands::Login { cp_url } => {
+            let url = resolve_cp_url(cp_url.as_deref())?;
+            commands::login(&url).await
+        }
         Commands::Acl {
             subcommand:
                 AclCommands::Json {
@@ -245,10 +249,6 @@ async fn main() -> Result<()> {
         _ => {
             let client = daemon::ensure_meshd(sock_path).await?;
             match cli.command {
-                Commands::Login { cp_url } => {
-                    let url = resolve_cp_url(cp_url.as_deref())?;
-                    commands::login(&client, &url).await
-                }
                 Commands::Request {
                     target,
                     capability,
@@ -329,8 +329,8 @@ async fn main() -> Result<()> {
                     // Already handled above (offline, no meshd)
                     AclCommands::Json { .. } => unreachable!(),
                 },
-                // Already handled above
-                Commands::Keygen => unreachable!(),
+                // Already handled above (no meshd required)
+                Commands::Keygen | Commands::Login { .. } => unreachable!(),
             }
         }
     }
