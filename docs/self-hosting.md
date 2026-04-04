@@ -4,7 +4,7 @@ Run your own agent-mesh server (Registry + Relay) on your infrastructure.
 
 ## Prerequisites
 
-- Rust 1.85+ (for building from source) or Docker
+- Rust toolchain (latest stable) or Docker
 - (Optional) OAuth app credentials from GitHub for login support
 
 ## Option 1: Docker
@@ -21,7 +21,7 @@ docker run -d \
   agent-mesh-server
 ```
 
-With OAuth:
+With OAuth (environment variables are read automatically):
 
 ```bash
 docker run -d \
@@ -31,12 +31,7 @@ docker run -d \
   -e OAUTH_PROVIDER=github \
   -e OAUTH_CLIENT_ID=your-client-id \
   -e OAUTH_CLIENT_SECRET=your-client-secret \
-  agent-mesh-server \
-  --listen 0.0.0.0:8080 \
-  --db-path /data/mesh.db \
-  --oauth-provider github \
-  --oauth-client-id your-client-id \
-  --oauth-client-secret your-client-secret
+  agent-mesh-server
 ```
 
 ## Option 2: Build from source
@@ -160,3 +155,32 @@ agent-mesh-server (single binary)
 ```
 
 SQLite database stores agent cards, ACL rules, revocations, and setup keys. The database file is specified via `--db-path` (default: `mesh.db`).
+
+## GitHub OAuth App Setup
+
+To enable `meshctl login`, create a GitHub OAuth App:
+
+1. Go to **Settings > Developer settings > OAuth Apps > New OAuth App**
+2. Set **Authorization callback URL** to `https://your-server.example.com/oauth/callback` (not actually used by Device Flow, but required by GitHub)
+3. Note the **Client ID** and generate a **Client Secret**
+4. Set the environment variables:
+   ```bash
+   OAUTH_PROVIDER=github
+   OAUTH_CLIENT_ID=<your-client-id>
+   OAUTH_CLIENT_SECRET=<your-client-secret>
+   ```
+
+## Endpoints
+
+| Path | Description |
+|---|---|
+| `/health` | Health check |
+| `/agents` | Agent Card CRUD and discovery |
+| `/relay/ws` | WebSocket relay for meshd connections |
+| `/sync` | CP Sync WebSocket for real-time updates |
+| `/device/code` | OAuth Device Flow initiation |
+| `/device/token` | OAuth Device Flow token polling |
+| `/users/me` | Current user info |
+| `/groups/*` | Group management |
+| `/acl/*` | ACL rule management |
+| `/setup-keys/*` | Setup Key management |

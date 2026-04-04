@@ -65,8 +65,56 @@ agent-mesh/
 
 ## Quick start
 
+### Official hosted instance
+
+The fastest way to get started. No server setup required.
+
 ```bash
-cargo build --release
+# Install
+cargo install --path crates/agent-meshctl
+cargo install --path crates/agent-meshd
+
+# Login via GitHub OAuth
+agent-meshctl login
+
+# Register an agent (keypair is auto-generated and saved to ~/.mesh/config.toml)
+agent-meshctl register --name "my-agent" --capabilities "echo,chat"
+
+# Discover agents in your group
+agent-meshctl discover
+```
+
+### Send requests between agents
+
+```bash
+# Terminal 1: Start your agent's local HTTP server (any server that accepts POST and returns JSON)
+python3 scripts/echo_server.py 9000 my-agent
+
+# Terminal 2: Connect to the relay
+agent-meshd \
+  --relay wss://agent-mesh.fly.dev/relay/ws \
+  --local-agent http://127.0.0.1:9000 \
+  --secret-key <SECRET_KEY> \
+  --cp-url https://agent-mesh.fly.dev
+
+# Terminal 3: Send a request to another agent
+agent-meshctl request \
+  --target <TARGET_AGENT_ID> \
+  --capability echo \
+  --payload '{"message": "hello"}'
+```
+
+### Self-hosting
+
+Run your own server instead of using the official instance. See [docs/self-hosting.md](docs/self-hosting.md) for Docker, fly.io, and VPS deployment options.
+
+```bash
+# Build and run
+cargo build --release -p agent-mesh-server
+./target/release/agent-mesh-server --listen 0.0.0.0:8080 --db-path mesh.db
+
+# Point meshctl at your server
+agent-meshctl login --cp-url https://your-server.example.com
 ```
 
 ### Demo (all-in-one)
@@ -76,51 +124,6 @@ cargo run --release -p examples --bin mesh-demo
 ```
 
 Starts relay, registry, mock agent, and meshd in a single process — runs the full Alice → Relay → Bob flow with agent registration, capability discovery, and Noise E2E encrypted communication.
-
-### Connect your own agent
-
-Requires 4 terminals: relay, registry, meshd, and a control terminal.
-
-```bash
-# --- Terminal 1: Relay ---
-agent-mesh-relay
-
-# --- Terminal 2: Registry ---
-agent-mesh-registry
-
-# --- Control terminal ---
-
-# Generate keypairs
-agent-meshctl keygen
-# Agent ID:    <BOB_ID>
-# Secret Key:  <BOB_KEY>
-
-agent-meshctl keygen
-# Agent ID:    <ALICE_ID>
-# Secret Key:  <ALICE_KEY>
-
-# Register Bob
-agent-meshctl register \
-  --name "bob" \
-  --capabilities "scheduling,availability" \
-  --secret-key <BOB_KEY>
-
-# --- Terminal 3: meshd (Bob's node) ---
-agent-meshd \
-  --relay ws://localhost:9800/ws \
-  --local-agent http://localhost:8080 \
-  --secret-key <BOB_KEY>
-
-# --- Back to control terminal ---
-
-# Discover agents and send a request as Alice
-agent-meshctl discover --capability scheduling
-agent-meshctl request \
-  --target <BOB_ID> \
-  --capability scheduling \
-  --payload '{"action": "list"}' \
-  --secret-key <ALICE_KEY>
-```
 
 Run `--help` on each binary for full options. `agent-meshd` also supports `--config meshd.json` for file-based configuration including ACL policies.
 
@@ -159,7 +162,8 @@ Run `--help` on each binary for full options. `agent-meshd` also supports `--con
 | `agent-meshd` | Local daemon — relay connection, ACL enforcement, HTTP proxy to local agent |
 | `agent-mesh-sdk` | `MeshClient` + `MeshAgent` — E2E encrypted requests, streaming, cancellation |
 | `agent-mesh-registry` | REST API for Agent Card CRUD, capability search, liveness enrichment |
-| `agent-meshctl` | CLI — `keygen`, `register`, `discover`, `request`, `status`, `revoke`, `acl` |
+| `agent-mesh-server` | All-in-one server (registry + relay) for hosted or self-hosted deployment |
+| `agent-meshctl` | CLI — `login`, `register`, `discover`, `request`, `status`, `revoke`, `rotate`, `acl`, `group`, `setup-key`, `up` |
 
 ## License
 

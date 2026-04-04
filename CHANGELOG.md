@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-04-04
+
+### Added
+
+- **fly.io deployment** — `Dockerfile`, `fly.toml`, `.dockerignore` for one-command deployment
+- **Official hosted instance** — Default CP URL (`https://agent-mesh.fly.dev`) for zero-config CLI usage
+- **CpClient** — Direct HTTP client to Control Plane, enabling `login`/`register`/`discover` without meshd
+- **Auto-keygen on register** — `meshctl register` auto-generates Ed25519 keypair and saves to `~/.mesh/config.toml` when no key is provided
+- **Self-hosting documentation** — `docs/self-hosting.md` with Docker, fly.io, VPS, and Docker Compose instructions
+- **E2E test script** — `scripts/echo_server.py` for local meshd testing
+
+### Changed
+
+- **meshctl login** — Connects directly to CP via HTTP instead of requiring meshd daemon
+- **meshctl register/discover** — Use `CpClient` for direct CP access, no meshd required
+- **OAuth config** — Server reads `OAUTH_PROVIDER`, `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET` from environment variables via clap `env` attribute
+- **meshd binary name** — Fixed `spawn_meshd()` to use correct binary name `agent-meshd`
+
+### Fixed
+
+- **Noise_XX handshake msg3 routing** — Messages with `in_reply_to` but no matching pending entry (e.g. handshake msg3 at the responder) now fall through to `handle_message()` instead of being silently dropped, fixing E2E encrypted communication
+
+[0.2.1]: https://github.com/ynishi/agent-mesh/compare/v0.2.0...v0.2.1
+
 ## [0.2.0] - 2026-04-04
 
 ### Added
