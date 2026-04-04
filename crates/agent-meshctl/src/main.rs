@@ -273,7 +273,16 @@ async fn main() -> Result<()> {
         #[cfg(feature = "mcp-server")]
         Commands::McpServer { listen } => {
             let client = daemon::ensure_meshd(sock_path).await?;
-            let token = std::env::var("MESH_MCP_TOKEN").ok();
+            // Token fallback chain:
+            // 1. MESH_MCP_TOKEN env (explicit override)
+            // 2. ~/.mesh/config.toml bearer_token (from meshctl login)
+            // 3. None → no auth (development mode)
+            let token = std::env::var("MESH_MCP_TOKEN").ok().or_else(|| {
+                MeshCredentials::default_mesh_dir()
+                    .and_then(|d| MeshCredentials::load(&d))
+                    .ok()
+                    .and_then(|c| c.bearer_token)
+            });
             agent_meshctl::mcp_server::serve(client, listen, token).await
         }
         _ => {
