@@ -9,6 +9,10 @@ description = "Core types for agent-mesh: identity, messages, ACL, Noise handsha
 keywords = ["agent", "mesh", "encryption", "noise", "identity"]
 categories = ["network-programming", "cryptography"]
 
+[features]
+default = []
+wasm = ["getrandom-02/js", "getrandom-04/wasm_js", "uuid/js"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,3 +24,13 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
 thiserror = { workspace = true }
+
+[dependencies.getrandom-02]
+package = "getrandom"
+version = "0.2"
+optional = true
+
+[dependencies.getrandom-04]
+package = "getrandom"
+version = "0.4"
+optional = true

@@ -8,6 +8,7 @@ members = [
     "crates/agent-meshd",
     "crates/agent-meshctl",
     "crates/agent-mesh-server",
+    "crates/agent-mesh-wasm",
     "examples",
     "tests",
 ]

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>agent-mesh</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#1a1a2e">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      background: #16213e;
+      padding: 1rem;
+      text-align: center;
+      border-bottom: 1px solid #0f3460;
+    }
+    header h1 { font-size: 1.2rem; color: #e94560; }
+    header p { font-size: 0.8rem; color: #888; margin-top: 0.25rem; }
+    main { flex: 1; padding: 1rem; max-width: 600px; margin: 0 auto; width: 100%; }
+
+    .section { margin-bottom: 1.5rem; }
+    .section h2 { font-size: 0.9rem; color: #e94560; margin-bottom: 0.5rem; }
+
+    label { display: block; font-size: 0.8rem; color: #aaa; margin-bottom: 0.25rem; }
+    input, textarea {
+      width: 100%;
+      padding: 0.5rem;
+      background: #0f3460;
+      border: 1px solid #1a1a2e;
+      color: #e0e0e0;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 0.85rem;
+      margin-bottom: 0.5rem;
+    }
+    textarea { min-height: 80px; resize: vertical; }
+    button {
+      padding: 0.5rem 1rem;
+      background: #e94560;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      margin-right: 0.5rem;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: #533483; }
+
+    #status {
+      padding: 0.5rem;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      margin-bottom: 1rem;
+    }
+    .status-disconnected { background: #3d0000; color: #ff6b6b; }
+    .status-connecting { background: #3d3d00; color: #ffd93d; }
+    .status-connected { background: #003d00; color: #6bff6b; }
+
+    #log {
+      background: #0a0a1a;
+      padding: 0.75rem;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 0.75rem;
+      max-height: 300px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .log-info { color: #6bff6b; }
+    .log-error { color: #ff6b6b; }
+    .log-send { color: #6bb5ff; }
+    .log-recv { color: #ffd93d; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>agent-mesh</h1>
+    <p>Private mesh network for AI agents</p>
+  </header>
+
+  <main>
+    <div id="status" class="status-disconnected">Disconnected</div>
+
+    <div class="section">
+      <h2>Connection</h2>
+      <label for="relay-url">Relay URL</label>
+      <input id="relay-url" value="wss://agent-mesh.fly.dev/relay/ws">
+      <label for="secret-key">Secret Key (hex) — from <code>meshctl register</code> or <code>~/.mesh/config.toml</code></label>
+      <input id="secret-key" placeholder="64 hex chars (registered agent key)">
+      <button id="btn-connect" onclick="doConnect()">Connect</button>
+    </div>
+
+    <div class="section">
+      <h2>Agent Info</h2>
+      <label>Agent ID</label>
+      <input id="agent-id" readonly placeholder="(not connected)">
+    </div>
+
+    <div class="section">
+      <h2>Send Request</h2>
+      <label for="target-id">Target Agent ID</label>
+      <input id="target-id" placeholder="base64url-encoded Ed25519 public key">
+      <label for="payload">Payload (JSON)</label>
+      <textarea id="payload">{"capability": "echo", "message": "hello from PWA"}</textarea>
+      <button id="btn-send" onclick="doRequest()" disabled>Send Request</button>
+    </div>
+
+    <div class="section">
+      <h2>Log</h2>
+      <div id="log"></div>
+    </div>
+  </main>
+
+  <script type="module">
+    import init, { MeshClient } from './pkg/agent_mesh_wasm.js';
+
+    let client = null;
+
+    window.log = function(msg, cls = 'log-info') {
+      const el = document.getElementById('log');
+      const time = new Date().toLocaleTimeString();
+      el.innerHTML += `<span class="${cls}">[${time}] ${msg}</span>\n`;
+      el.scrollTop = el.scrollHeight;
+    };
+
+    function setStatus(text, cls) {
+      const el = document.getElementById('status');
+      el.textContent = text;
+      el.className = cls;
+    }
+
+    window.doConnect = async function() {
+      try {
+        await init();
+        const relayUrl = document.getElementById('relay-url').value;
+        const secretKey = document.getElementById('secret-key').value.trim();
+
+        setStatus('Connecting...', 'status-connecting');
+        log(`Connecting to ${relayUrl}...`);
+
+        if (!secretKey) {
+          log('Secret key is required. Use a key from: meshctl register or ~/.mesh/config.toml', 'log-error');
+          setStatus('Disconnected', 'status-disconnected');
+          return;
+        }
+        client = await MeshClient.connect(secretKey, relayUrl);
+
+        const agentId = client.agentId();
+        document.getElementById('agent-id').value = agentId;
+        document.getElementById('btn-send').disabled = false;
+        setStatus(`Connected as ${agentId.substring(0, 12)}...`, 'status-connected');
+        log(`Authenticated. Agent ID: ${agentId}`);
+      } catch (e) {
+        setStatus('Connection failed', 'status-disconnected');
+        log(`Error: ${e.message || e}`, 'log-error');
+      }
+    };
+
+    window.doRequest = async function() {
+      if (!client) { log('Not connected', 'log-error'); return; }
+      try {
+        const targetId = document.getElementById('target-id').value.trim();
+        const payload = document.getElementById('payload').value.trim();
+
+        if (!targetId) { log('Target Agent ID is required', 'log-error'); return; }
+
+        log(`→ Sending to ${targetId.substring(0, 12)}...`, 'log-send');
+        log(`  Payload: ${payload}`, 'log-send');
+
+        const response = await client.request(targetId, payload);
+        log(`← Response: ${response}`, 'log-recv');
+      } catch (e) {
+        log(`Error: ${e.message || e}`, 'log-error');
+      }
+    };
+
+    // Register service worker for PWA
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    }
+  </script>
+</body>
+</html>

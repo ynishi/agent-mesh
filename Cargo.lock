@@ -39,11 +39,13 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64",
  "chrono",
  "ed25519-dalek",
+ "getrandom 0.2.17",
+ "getrandom 0.4.2",
  "rand 0.8.5",
  "serde",
  "serde_json",
@@ -55,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-registry"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agent-mesh-core",
  "anyhow",
@@ -79,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-relay"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agent-mesh-core",
  "agent-mesh-sdk",
@@ -106,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-sdk"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agent-mesh-core",
  "async-trait",
@@ -124,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-server"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agent-mesh-core",
  "agent-mesh-registry",
@@ -141,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-tests"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agent-mesh-core",
  "agent-mesh-registry",
@@ -166,8 +168,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-mesh-wasm"
+version = "0.2.1"
+dependencies = [
+ "agent-mesh-core",
+ "base64",
+ "ed25519-dalek",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio-tungstenite-wasm",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "agent-meshctl"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agent-mesh-core",
  "anyhow",
@@ -193,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "agent-meshd"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agent-mesh-core",
  "anyhow",
@@ -717,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "examples"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agent-mesh-core",
  "agent-mesh-registry",
@@ -876,10 +896,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2227,6 +2249,25 @@ dependencies = [
  "log",
  "tokio",
  "tungstenite 0.28.0",
+]
+
+[[package]]
+name = "tokio-tungstenite-wasm"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccecee909c02b8863f9bda87253127eb4da0e7e1342330b2583fbc4d1795c2f8"
+dependencies = [
+ "bytes",
+ "futures-channel",
+ "futures-util",
+ "http",
+ "httparse",
+ "js-sys",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
