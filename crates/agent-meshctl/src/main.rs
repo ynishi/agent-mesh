@@ -125,6 +125,13 @@ enum Commands {
         #[arg(long)]
         secret_key: Option<String>,
     },
+    /// Start MCP Streamable HTTP server for remote MCP clients.
+    #[cfg(feature = "mcp-server")]
+    McpServer {
+        /// Listen address (default: 127.0.0.1:8090).
+        #[arg(long, default_value = "127.0.0.1:8090")]
+        listen: std::net::SocketAddr,
+    },
 }
 
 #[derive(Subcommand)]
@@ -263,6 +270,12 @@ async fn main() -> Result<()> {
                     allow,
                 },
         } => commands::acl_json(&source, &target, &allow),
+        #[cfg(feature = "mcp-server")]
+        Commands::McpServer { listen } => {
+            let client = daemon::ensure_meshd(sock_path).await?;
+            let token = std::env::var("MESH_MCP_TOKEN").ok();
+            agent_meshctl::mcp_server::serve(client, listen, token).await
+        }
         _ => {
             let client = daemon::ensure_meshd(sock_path).await?;
             match cli.command {
@@ -333,6 +346,9 @@ async fn main() -> Result<()> {
                 | Commands::Login { .. }
                 | Commands::Register { .. }
                 | Commands::Discover { .. } => unreachable!(),
+                // Already handled above (mcp-server feature arm)
+                #[cfg(feature = "mcp-server")]
+                Commands::McpServer { .. } => unreachable!(),
             }
         }
     }

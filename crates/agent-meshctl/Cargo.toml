@@ -13,6 +13,10 @@ categories = ["command-line-utilities"]
 name = "agent-meshctl"
 path = "src/main.rs"
 
+[features]
+default = []
+mcp-server = ["dep:rmcp", "dep:schemars", "dep:axum"]
+
 [dependencies]
 agent-mesh-core = { workspace = true }
 tokio = { workspace = true }
@@ -32,7 +36,12 @@ hyper = { version = "1", features = ["http1", "client"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 bytes = "1"
+rmcp = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
 
 [dev-dependencies]
 axum = { workspace = true }
+chrono = { workspace = true }
 tempfile = "3"
+tower = { workspace = true }
