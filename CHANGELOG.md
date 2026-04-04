@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-04-04
+
+### Added
+
+- **WASM/PWA client** — Cross-platform mesh client (`agent-mesh-wasm`) with Noise_XX E2E encryption, browser WebSocket support via `tokio-tungstenite-wasm`
+- **PWA static file serving** — `--pwa-dir` flag to serve PWA from the same origin (no separate web server needed)
+- **GitHub Device Flow login** — OAuth endpoints (`/oauth/device`, `/oauth/token`) for browser-based authentication
+- **PWA rewrite** — Vite + React + TypeScript with Catppuccin Mocha theme
+
+### Changed
+
+- **CORS default** — Changed from allow-all to same-origin only; requires explicit `CORS_ORIGINS` env var to enable cross-origin access
+- **API token generation** — Replaced UUID v4 (122-bit entropy) with CSPRNG 32-byte hex (256-bit entropy)
+- **OAuth response types** — Type-safe `TokenExchangeResponse` enum (`#[serde(untagged)]`, JSON-compatible with existing clients)
+
+### Fixed
+
+- **CORS security** — Production deployments no longer default to `Access-Control-Allow-Origin: *`
+- **OAuth error context** — Preserved error descriptions from GitHub in token exchange responses
+
 ## [0.2.1] - 2026-04-04
 
 ### Added
@@ -27,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Noise_XX handshake msg3 routing** — Messages with `in_reply_to` but no matching pending entry (e.g. handshake msg3 at the responder) now fall through to `handle_message()` instead of being silently dropped, fixing E2E encrypted communication
 
+[0.2.2]: https://github.com/ynishi/agent-mesh/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/ynishi/agent-mesh/compare/v0.2.0...v0.2.1
 
 ## [0.2.0] - 2026-04-04

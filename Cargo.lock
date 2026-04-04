@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64",
  "chrono",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-registry"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "agent-mesh-core",
  "anyhow",
@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-relay"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "agent-mesh-core",
  "agent-mesh-sdk",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-sdk"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "agent-mesh-core",
  "async-trait",
@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "agent-mesh-core",
  "agent-mesh-registry",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-tests"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "agent-mesh-core",
  "agent-mesh-registry",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "agent-mesh-wasm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "agent-mesh-core",
  "base64",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "agent-meshctl"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "agent-mesh-core",
  "anyhow",
@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "agent-meshd"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "agent-mesh-core",
  "anyhow",
@@ -738,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "examples"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "agent-mesh-core",
  "agent-mesh-registry",
