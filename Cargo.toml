@@ -54,7 +54,7 @@ sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Error handling
 thiserror = "2"

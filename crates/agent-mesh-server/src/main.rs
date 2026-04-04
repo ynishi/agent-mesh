@@ -20,13 +20,13 @@ struct Cli {
     #[arg(long, default_value = "mesh.db")]
     db_path: String,
     /// OAuth provider name (e.g. "github"). Required together with --oauth-client-id and --oauth-client-secret.
-    #[arg(long)]
+    #[arg(long, env = "OAUTH_PROVIDER")]
     oauth_provider: Option<String>,
     /// OAuth client ID.
-    #[arg(long)]
+    #[arg(long, env = "OAUTH_CLIENT_ID")]
     oauth_client_id: Option<String>,
     /// OAuth client secret.
-    #[arg(long)]
+    #[arg(long, env = "OAUTH_CLIENT_SECRET")]
     oauth_client_secret: Option<String>,
 }
 
