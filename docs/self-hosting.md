@@ -115,17 +115,20 @@ volumes:
 
 ## CORS Configuration
 
-By default, all origins are allowed. To restrict CORS origins (recommended for production):
+By default, **no CORS headers are sent** (same-origin only). This is the correct setting when serving the PWA from the same origin via `--pwa-dir`.
+
+To allow cross-origin access (e.g., external frontends or development):
 
 ```bash
-# Via environment variable
+# Allow all origins
+CORS_ORIGINS="*"
+
+# Allow specific origins
 CORS_ORIGINS="https://your-pwa.example.com,https://other.example.com"
 
 # Via CLI flag
 --cors-origins "https://your-pwa.example.com"
 ```
-
-When the PWA is served from the same origin (`--pwa-dir`), CORS restrictions are not needed for the PWA itself, but you may still want to set them to control access from other origins.
 
 ## Connecting meshctl to your server
 

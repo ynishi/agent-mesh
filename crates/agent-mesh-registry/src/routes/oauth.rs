@@ -32,6 +32,24 @@ pub struct LoginResponse {
     pub user_id: UserId,
 }
 
+/// Pending/slow-down response forwarded from GitHub.
+#[derive(Debug, Serialize)]
+pub struct PendingResponse {
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interval: Option<u64>,
+}
+
+/// Token exchange result: either a successful login or a pending/error from GitHub.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum TokenExchangeResponse {
+    Success(LoginResponse),
+    Pending(PendingResponse),
+}
+
 /// GitHub token endpoint response (may contain error or access_token).
 #[derive(Debug, Deserialize)]
 struct GitHubTokenResponse {
@@ -113,7 +131,7 @@ pub async fn start_device_flow(
 pub async fn exchange_token(
     State(state): State<AppState>,
     Json(req): Json<TokenRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<TokenExchangeResponse>, (StatusCode, String)> {
     let config = state.oauth_config.as_ref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -152,14 +170,11 @@ pub async fn exchange_token(
     // If GitHub returned an error (authorization_pending, slow_down, etc.)
     // forward it verbatim so the CLI can handle polling.
     if let Some(error) = gh_resp.error {
-        let mut body = serde_json::json!({ "error": error });
-        if let Some(desc) = gh_resp.error_description {
-            body["error_description"] = serde_json::Value::String(desc);
-        }
-        if let Some(interval) = gh_resp.interval {
-            body["interval"] = serde_json::Value::Number(interval.into());
-        }
-        return Ok(Json(body));
+        return Ok(Json(TokenExchangeResponse::Pending(PendingResponse {
+            error,
+            error_description: gh_resp.error_description,
+            interval: gh_resp.interval,
+        })));
     }
 
     let access_token = gh_resp.access_token.ok_or_else(|| {
@@ -228,7 +243,11 @@ pub async fn exchange_token(
     })?;
 
     // Issue a new API token with 24-hour expiry.
-    let raw_token = uuid::Uuid::new_v4().to_string();
+    let raw_token = {
+        use rand::Rng;
+        let bytes: [u8; 32] = rand::thread_rng().gen();
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
     let token_hash = hash_token(&raw_token);
     let now = chrono::Utc::now();
     let api_token = ApiToken {
@@ -244,14 +263,8 @@ pub async fn exchange_token(
         )
     })?;
 
-    let response = LoginResponse {
+    Ok(Json(TokenExchangeResponse::Success(LoginResponse {
         api_token: raw_token,
         user_id: user.id,
-    };
-    Ok(Json(serde_json::to_value(response).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("serialization error: {e}"),
-        )
-    })?))
+    })))
 }

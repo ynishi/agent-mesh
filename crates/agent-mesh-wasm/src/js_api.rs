@@ -141,6 +141,7 @@ fn hex_to_bytes(hex: &str) -> Result<[u8; 32], JsError> {
     Ok(arr)
 }
 
+/// Minimal hex encode/decode to avoid pulling in the `hex` crate (saves ~4 KB in WASM).
 mod hex {
     pub fn decode(s: &str) -> Result<Vec<u8>, String> {
         if !s.len().is_multiple_of(2) {

@@ -24,6 +24,8 @@ type WsStreamHalf = futures_util::stream::SplitStream<tokio_tungstenite_wasm::We
 pub struct WasmMeshClient {
     keypair: AgentKeypair,
     noise_keypair: NoiseKeypair,
+    #[allow(dead_code)] // reserved for future reconnect support
+    session_token: Option<String>,
     sink: Rc<RefCell<WsSink>>,
     stream: Rc<RefCell<WsStreamHalf>>,
     sessions: Rc<RefCell<SessionMap>>,
@@ -38,7 +40,7 @@ impl WasmMeshClient {
 
         let (mut sink, mut stream) = ws_stream.split();
 
-        let _session_token = challenge_response_auth(&keypair, &mut sink, &mut stream).await?;
+        let session_token = challenge_response_auth(&keypair, &mut sink, &mut stream).await?;
 
         let noise_keypair =
             NoiseKeypair::generate().map_err(|e| WasmSdkError::Protocol(e.to_string()))?;
@@ -46,6 +48,7 @@ impl WasmMeshClient {
         Ok(Self {
             keypair,
             noise_keypair,
+            session_token,
             sink: Rc::new(RefCell::new(sink)),
             stream: Rc::new(RefCell::new(stream)),
             sessions: Rc::new(RefCell::new(HashMap::new())),
@@ -202,6 +205,10 @@ impl WasmMeshClient {
                         if envelope.in_reply_to == Some(expected_reply_to) {
                             return Ok(envelope);
                         }
+                        log_warn(&format!(
+                            "skipping message id={} type={:?} (expected reply_to={expected_reply_to})",
+                            envelope.id, envelope.msg_type
+                        ));
                     }
                 }
                 Some(Err(e)) => {
@@ -273,4 +280,11 @@ async fn receive_ws_json<T: serde::de::DeserializeOwned>(stream: &mut WsStreamHa
         Some(Ok(Message::Text(text))) => serde_json::from_str(&text).ok(),
         _ => None,
     }
+}
+
+fn log_warn(msg: &str) {
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&msg.into());
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("[WARN] {msg}");
 }

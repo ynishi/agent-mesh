@@ -30,7 +30,10 @@ struct Cli {
     /// OAuth client secret.
     #[arg(long, env = "OAUTH_CLIENT_SECRET")]
     oauth_client_secret: Option<String>,
-    /// Allowed CORS origins (comma-separated). Defaults to allow-all if unset.
+    /// Allowed CORS origins (comma-separated).
+    /// If unset, no CORS headers are sent (same-origin only).
+    /// Set to "*" to allow all origins, or specify domains like
+    /// "https://app.example.com,https://other.example.com".
     #[arg(long, env = "CORS_ORIGINS")]
     cors_origins: Option<String>,
     /// Directory to serve PWA static files from. If set, serves index.html
@@ -96,33 +99,32 @@ async fn main() -> anyhow::Result<()> {
     let cp_router = agent_mesh_registry::app(cp_state);
     let relay_router = agent_mesh_relay::app(Arc::clone(&hub));
 
-    let cors = match cli.cors_origins {
-        Some(ref origins) => {
-            let allowed: Vec<_> = origins
-                .split(',')
-                .filter_map(|s| s.trim().parse().ok())
-                .collect();
-            CorsLayer::new()
-                .allow_origin(AllowOrigin::list(allowed))
-                .allow_methods(Any)
-                .allow_headers(Any)
-        }
-        None => {
-            tracing::warn!(
-                "CORS_ORIGINS not set — allowing all origins. \
-                 Set CORS_ORIGINS for production deployments."
-            );
+    let mut app = axum::Router::new()
+        .nest("/relay", relay_router)
+        .merge(cp_router);
+
+    // CORS: only added when CORS_ORIGINS is explicitly set.
+    // Unset = same-origin only (no CORS headers).
+    if let Some(ref origins) = cli.cors_origins {
+        let cors = if origins.trim() == "*" {
+            tracing::info!("CORS: allowing all origins");
             CorsLayer::new()
                 .allow_origin(Any)
                 .allow_methods(Any)
                 .allow_headers(Any)
-        }
-    };
-
-    let mut app = axum::Router::new()
-        .nest("/relay", relay_router)
-        .merge(cp_router)
-        .layer(cors);
+        } else {
+            let allowed: Vec<_> = origins
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            tracing::info!(origins = %origins, "CORS: allowing specified origins");
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(allowed))
+                .allow_methods(Any)
+                .allow_headers(Any)
+        };
+        app = app.layer(cors);
+    }
 
     // 5b. Optionally serve PWA static files as a fallback.
     if let Some(ref pwa_dir) = cli.pwa_dir {
