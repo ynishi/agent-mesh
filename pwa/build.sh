@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the WASM package and symlink into pwa/pkg for local dev.
+# Build WASM + PWA (Vite + React).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -9,8 +9,12 @@ cd crates/agent-mesh-wasm
 wasm-pack build --target web --release
 cd ../..
 
-# Symlink pkg into pwa/
-rm -f pwa/pkg
-ln -sf ../crates/agent-mesh-wasm/pkg pwa/pkg
+echo "Building PWA..."
+cd pwa
+npm ci --legacy-peer-deps
+npx tsc --noEmit
+npx vite build
+cd ..
 
-echo "Done. Serve with: python3 -m http.server -d pwa 8000"
+echo "Done. Output: pwa/dist/"
+echo "Serve with: agent-mesh-server --pwa-dir pwa/dist"

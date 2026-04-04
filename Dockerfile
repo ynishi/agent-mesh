@@ -12,17 +12,20 @@ WORKDIR /app
 COPY . .
 RUN cargo build --release -p agent-mesh-server
 
-# ── Stage 3: Assemble PWA directory ──────────────────────────────────────────
-FROM debian:bookworm-slim AS assembler
-WORKDIR /pwa
-COPY pwa/index.html pwa/manifest.json pwa/sw.js ./
-COPY --from=wasm-builder /app/crates/agent-mesh-wasm/pkg/agent_mesh_wasm.js ./pkg/
-COPY --from=wasm-builder /app/crates/agent-mesh-wasm/pkg/agent_mesh_wasm_bg.wasm ./pkg/
+# ── Stage 3: PWA Builder (Vite + React) ─────────────────────────────────────
+FROM node:21-slim AS pwa-builder
+WORKDIR /build/pwa
+COPY pwa/package.json pwa/package-lock.json* ./
+RUN npm ci --legacy-peer-deps
+COPY pwa/ ./
+# vite.config.ts resolves @wasm → ../crates/agent-mesh-wasm/pkg
+COPY --from=wasm-builder /app/crates/agent-mesh-wasm/pkg /build/crates/agent-mesh-wasm/pkg
+RUN npx vite build
 
 # ── Stage 4: Runtime (distroless) ────────────────────────────────────────────
 FROM gcr.io/distroless/cc-debian12 AS runtime
 COPY --from=builder /app/target/release/agent-mesh-server /usr/local/bin/agent-mesh-server
-COPY --from=assembler /pwa /pwa
+COPY --from=pwa-builder /build/pwa/dist /pwa
 
 EXPOSE 8080
 

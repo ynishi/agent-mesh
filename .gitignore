@@ -6,3 +6,6 @@ workspace
 .claude
 *.db
 .env
+pwa/node_modules
+pwa/dist
+pwa/pkg
