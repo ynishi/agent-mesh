@@ -82,7 +82,13 @@ pub async fn start_device_flow(
 
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
+        let body = match resp.text().await {
+            Ok(text) => text,
+            Err(e) => {
+                tracing::warn!("failed to read GitHub error body: {e}");
+                String::new()
+            }
+        };
         return Err((
             StatusCode::BAD_GATEWAY,
             format!("GitHub returned {status}: {body}"),

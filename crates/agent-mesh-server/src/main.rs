@@ -107,10 +107,16 @@ async fn main() -> anyhow::Result<()> {
                 .allow_methods(Any)
                 .allow_headers(Any)
         }
-        None => CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any),
+        None => {
+            tracing::warn!(
+                "CORS_ORIGINS not set — allowing all origins. \
+                 Set CORS_ORIGINS for production deployments."
+            );
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any)
+        }
     };
 
     let mut app = axum::Router::new()
