@@ -7,6 +7,7 @@ use agent_mesh_relay::GateVerifier;
 use async_trait::async_trait;
 use clap::Parser;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::services::ServeDir;
 
 #[derive(Parser)]
 #[command(
@@ -32,6 +33,10 @@ struct Cli {
     /// Allowed CORS origins (comma-separated). Defaults to allow-all if unset.
     #[arg(long, env = "CORS_ORIGINS")]
     cors_origins: Option<String>,
+    /// Directory to serve PWA static files from. If set, serves index.html
+    /// and assets at the root path (fallback after API routes).
+    #[arg(long, env = "PWA_DIR")]
+    pwa_dir: Option<String>,
 }
 
 /// In-process gate verifier: resolves agent_id → group_id via direct DB access.
@@ -108,10 +113,16 @@ async fn main() -> anyhow::Result<()> {
             .allow_headers(Any),
     };
 
-    let app = axum::Router::new()
+    let mut app = axum::Router::new()
         .nest("/relay", relay_router)
         .merge(cp_router)
         .layer(cors);
+
+    // 5b. Optionally serve PWA static files as a fallback.
+    if let Some(ref pwa_dir) = cli.pwa_dir {
+        tracing::info!(dir = %pwa_dir, "serving PWA static files");
+        app = app.fallback_service(ServeDir::new(pwa_dir).append_index_html_on_directories(true));
+    }
 
     // 6. Start server.
     let listener = tokio::net::TcpListener::bind(&cli.listen).await?;

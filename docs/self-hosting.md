@@ -1,19 +1,22 @@
 # Self-Hosting Guide
 
-Run your own agent-mesh server (Registry + Relay) on your infrastructure.
+Run your own agent-mesh server (Registry + Relay + PWA) on your infrastructure.
 
 ## Prerequisites
 
 - Rust toolchain (latest stable) or Docker
 - (Optional) OAuth app credentials from GitHub for login support
+- (Optional) `wasm-pack` for building the PWA client from source
 
-## Option 1: Docker
+## Option 1: Docker (recommended)
+
+The Docker image builds both the server and the WASM/PWA client. The PWA is served at `/` by the same process — no separate web server needed.
 
 ```bash
-# Build
+# Build (includes wasm-pack stage)
 docker build -t agent-mesh-server .
 
-# Run
+# Run (PWA served from /pwa by default)
 docker run -d \
   -p 8080:8080 \
   -v mesh-data:/data \
@@ -21,7 +24,7 @@ docker run -d \
   agent-mesh-server
 ```
 
-With OAuth (environment variables are read automatically):
+With OAuth:
 
 ```bash
 docker run -d \
@@ -34,12 +37,37 @@ docker run -d \
   agent-mesh-server
 ```
 
+Without PWA (API-only mode):
+
+```bash
+docker run -d \
+  -p 8080:8080 \
+  -v mesh-data:/data \
+  -e RUST_LOG=info \
+  agent-mesh-server \
+  --listen 0.0.0.0:8080 --db-path /data/mesh.db
+```
+
 ## Option 2: Build from source
 
 ```bash
+# Build server
 cargo build --release -p agent-mesh-server
 
-# Run
+# Build PWA (optional)
+cd crates/agent-mesh-wasm && wasm-pack build --target web --release && cd ../..
+mkdir -p pwa-dist/pkg
+cp pwa/index.html pwa/manifest.json pwa/sw.js pwa-dist/
+cp crates/agent-mesh-wasm/pkg/agent_mesh_wasm.js pwa-dist/pkg/
+cp crates/agent-mesh-wasm/pkg/agent_mesh_wasm_bg.wasm pwa-dist/pkg/
+
+# Run with PWA
+./target/release/agent-mesh-server \
+  --listen 0.0.0.0:8080 \
+  --db-path mesh.db \
+  --pwa-dir pwa-dist
+
+# Run without PWA (API-only)
 ./target/release/agent-mesh-server \
   --listen 0.0.0.0:8080 \
   --db-path mesh.db
@@ -62,7 +90,7 @@ fly secrets set OAUTH_PROVIDER=github
 fly secrets set OAUTH_CLIENT_ID=your-client-id
 fly secrets set OAUTH_CLIENT_SECRET=your-client-secret
 
-# Deploy
+# Deploy (builds server + WASM, serves PWA at /)
 fly deploy
 ```
 
@@ -84,6 +112,20 @@ services:
 volumes:
   mesh-data:
 ```
+
+## CORS Configuration
+
+By default, all origins are allowed. To restrict CORS origins (recommended for production):
+
+```bash
+# Via environment variable
+CORS_ORIGINS="https://your-pwa.example.com,https://other.example.com"
+
+# Via CLI flag
+--cors-origins "https://your-pwa.example.com"
+```
+
+When the PWA is served from the same origin (`--pwa-dir`), CORS restrictions are not needed for the PWA itself, but you may still want to set them to control access from other origins.
 
 ## Connecting meshctl to your server
 
@@ -150,11 +192,18 @@ agent-mesh-server (single binary)
 │   ├── /agents/*
 │   ├── /health
 │   └── /status
-└── Relay (WebSocket hub, routing, offline buffering)
-    └── /relay/ws
+├── Relay (WebSocket hub, routing, offline buffering)
+│   └── /relay/ws
+└── PWA (optional, --pwa-dir)
+    ├── /            → index.html
+    ├── /sw.js       → Service Worker
+    ├── /manifest.json
+    └── /pkg/*       → WASM assets
 ```
 
 SQLite database stores agent cards, ACL rules, revocations, and setup keys. The database file is specified via `--db-path` (default: `mesh.db`).
+
+The PWA is served as a fallback — API and relay routes take priority. If `--pwa-dir` is not set, the server runs in API-only mode.
 
 ## GitHub OAuth App Setup
 
@@ -178,9 +227,10 @@ To enable `meshctl login`, create a GitHub OAuth App:
 | `/agents` | Agent Card CRUD and discovery |
 | `/relay/ws` | WebSocket relay for meshd connections |
 | `/sync` | CP Sync WebSocket for real-time updates |
-| `/device/code` | OAuth Device Flow initiation |
-| `/device/token` | OAuth Device Flow token polling |
+| `/oauth/device` | OAuth Device Flow initiation |
+| `/oauth/token` | OAuth Device Flow token polling |
 | `/users/me` | Current user info |
 | `/groups/*` | Group management |
 | `/acl/*` | ACL rule management |
 | `/setup-keys/*` | Setup Key management |
+| `/` | PWA client (if `--pwa-dir` is set) |

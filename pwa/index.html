@@ -5,71 +5,105 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>agent-mesh</title>
   <link rel="manifest" href="manifest.json">
-  <meta name="theme-color" content="#1a1a2e">
+  <meta name="theme-color" content="#1e1e2e">
   <style>
+    /* Catppuccin Mocha palette */
+    :root {
+      --crust:    #11111b;
+      --mantle:   #181825;
+      --base:     #1e1e2e;
+      --surface0: #313244;
+      --surface1: #45475a;
+      --surface2: #585b70;
+      --overlay0: #6c7086;
+      --overlay1: #7f849c;
+      --subtext0: #a6adc8;
+      --subtext1: #bac2de;
+      --text:     #cdd6f4;
+      --lavender: #b4befe;
+      --blue:     #89b4fa;
+      --sapphire: #74c7ec;
+      --sky:      #89dceb;
+      --teal:     #94e2d5;
+      --green:    #a6e3a1;
+      --yellow:   #f9e2af;
+      --peach:    #fab387;
+      --maroon:   #eba0ac;
+      --red:      #f38ba8;
+      --mauve:    #cba6f7;
+      --pink:     #f5c2e7;
+      --flamingo: #f2cdcd;
+      --rosewater:#f5e0dc;
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      background: #1a1a2e;
-      color: #e0e0e0;
+      background: var(--base);
+      color: var(--text);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
     }
     header {
-      background: #16213e;
+      background: var(--mantle);
       padding: 1rem;
       text-align: center;
-      border-bottom: 1px solid #0f3460;
+      border-bottom: 1px solid var(--surface0);
     }
-    header h1 { font-size: 1.2rem; color: #e94560; }
-    header p { font-size: 0.8rem; color: #888; margin-top: 0.25rem; }
+    header h1 { font-size: 1.2rem; color: var(--mauve); }
+    header p { font-size: 0.8rem; color: var(--overlay1); margin-top: 0.25rem; }
     main { flex: 1; padding: 1rem; max-width: 600px; margin: 0 auto; width: 100%; }
 
     .section { margin-bottom: 1.5rem; }
-    .section h2 { font-size: 0.9rem; color: #e94560; margin-bottom: 0.5rem; }
+    .section h2 { font-size: 0.9rem; color: var(--mauve); margin-bottom: 0.5rem; }
 
-    label { display: block; font-size: 0.8rem; color: #aaa; margin-bottom: 0.25rem; }
+    label { display: block; font-size: 0.8rem; color: var(--subtext0); margin-bottom: 0.25rem; }
     input, textarea {
       width: 100%;
       padding: 0.5rem;
-      background: #0f3460;
-      border: 1px solid #1a1a2e;
-      color: #e0e0e0;
-      border-radius: 4px;
+      background: var(--surface0);
+      border: 1px solid var(--surface1);
+      color: var(--text);
+      border-radius: 6px;
       font-family: monospace;
       font-size: 0.85rem;
       margin-bottom: 0.5rem;
+      transition: border-color 0.15s;
     }
+    input:focus, textarea:focus { outline: none; border-color: var(--lavender); }
     textarea { min-height: 80px; resize: vertical; }
     button {
       padding: 0.5rem 1rem;
-      background: #e94560;
-      color: white;
+      background: var(--mauve);
+      color: var(--crust);
       border: none;
-      border-radius: 4px;
+      border-radius: 6px;
       cursor: pointer;
       font-size: 0.85rem;
+      font-weight: 600;
       margin-right: 0.5rem;
       margin-bottom: 0.5rem;
+      transition: background 0.15s;
     }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    button.secondary { background: #533483; }
+    button:hover { background: var(--lavender); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.secondary { background: var(--surface1); color: var(--text); }
+    button.secondary:hover { background: var(--surface2); }
 
     #status {
       padding: 0.5rem;
-      border-radius: 4px;
+      border-radius: 6px;
       font-size: 0.8rem;
       margin-bottom: 1rem;
     }
-    .status-disconnected { background: #3d0000; color: #ff6b6b; }
-    .status-connecting { background: #3d3d00; color: #ffd93d; }
-    .status-connected { background: #003d00; color: #6bff6b; }
+    .status-disconnected { background: var(--surface0); color: var(--red); }
+    .status-connecting { background: var(--surface0); color: var(--yellow); }
+    .status-connected { background: var(--surface0); color: var(--green); }
 
     #log {
-      background: #0a0a1a;
+      background: var(--crust);
       padding: 0.75rem;
-      border-radius: 4px;
+      border-radius: 6px;
       font-family: monospace;
       font-size: 0.75rem;
       max-height: 300px;
@@ -77,44 +111,46 @@
       white-space: pre-wrap;
       word-break: break-all;
     }
-    .log-info { color: #6bff6b; }
-    .log-error { color: #ff6b6b; }
-    .log-send { color: #6bb5ff; }
-    .log-recv { color: #ffd93d; }
+    .log-info { color: var(--green); }
+    .log-error { color: var(--red); }
+    .log-send { color: var(--blue); }
+    .log-recv { color: var(--yellow); }
 
     .user-code {
       font-size: 1.5rem;
       font-weight: bold;
-      color: #e94560;
+      color: var(--peach);
       text-align: center;
       padding: 0.75rem;
-      background: #16213e;
-      border-radius: 4px;
+      background: var(--surface0);
+      border-radius: 6px;
       letter-spacing: 0.3rem;
       margin: 0.5rem 0;
     }
     .hidden { display: none; }
     .step-label {
       font-size: 0.75rem;
-      color: #888;
+      color: var(--overlay1);
       margin-bottom: 0.25rem;
     }
-    a { color: #6bb5ff; }
+    a { color: var(--sapphire); }
+    a:hover { color: var(--sky); }
     .agent-card {
-      background: #16213e;
-      border: 1px solid #0f3460;
-      border-radius: 4px;
+      background: var(--surface0);
+      border: 1px solid var(--surface1);
+      border-radius: 6px;
       padding: 0.5rem 0.75rem;
       margin-bottom: 0.4rem;
       cursor: pointer;
       font-size: 0.8rem;
-      transition: border-color 0.15s;
+      transition: border-color 0.15s, background 0.15s;
     }
-    .agent-card:hover { border-color: #e94560; }
-    .agent-card .agent-name { color: #e94560; font-weight: bold; }
-    .agent-card .agent-caps { color: #888; font-size: 0.7rem; }
-    .agent-card .agent-aid { color: #6bb5ff; font-family: monospace; font-size: 0.7rem; }
+    .agent-card:hover { border-color: var(--mauve); background: var(--surface1); }
+    .agent-card .agent-name { color: var(--pink); font-weight: bold; }
+    .agent-card .agent-caps { color: var(--overlay0); font-size: 0.7rem; }
+    .agent-card .agent-aid { color: var(--blue); font-family: monospace; font-size: 0.7rem; }
     .agent-card.self { opacity: 0.5; cursor: default; }
+    .agent-card.self:hover { border-color: var(--surface1); background: var(--surface0); }
   </style>
 </head>
 <body>
@@ -129,8 +165,8 @@
     <!-- Step 1: Login -->
     <div id="login-section" class="section">
       <h2>Login</h2>
-      <label for="cp-url">Server URL</label>
-      <input id="cp-url" value="https://agent-mesh.fly.dev">
+      <label for="cp-url">Server URL (blank = same origin)</label>
+      <input id="cp-url" value="" placeholder="https://agent-mesh.fly.dev">
       <button id="btn-login" onclick="doLogin()">Login with GitHub</button>
       <button class="secondary" onclick="toggleManual()">Use Secret Key</button>
 
@@ -146,8 +182,8 @@
 
       <!-- Manual key input (toggled) -->
       <div id="manual-section" class="hidden">
-        <label for="relay-url">Relay URL</label>
-        <input id="relay-url" value="wss://agent-mesh.fly.dev/relay/ws">
+        <label for="relay-url">Relay URL (blank = same origin)</label>
+        <input id="relay-url" value="" placeholder="wss://agent-mesh.fly.dev/relay/ws">
         <label for="secret-key">Secret Key (hex)</label>
         <input id="secret-key" placeholder="64 hex chars from ~/.mesh/config.toml">
         <button onclick="doManualConnect()">Connect</button>
@@ -217,7 +253,8 @@
     }
 
     function cpUrl() {
-      return document.getElementById('cp-url').value.replace(/\/+$/, '');
+      const val = document.getElementById('cp-url').value.trim();
+      return (val || location.origin).replace(/\/+$/, '');
     }
 
     function relayUrlFromCp(cp) {
@@ -393,7 +430,8 @@
     window.doManualConnect = async function() {
       try {
         if (!wasmReady) { await init(); wasmReady = true; }
-        const relayUrl = document.getElementById('relay-url').value;
+        const relayVal = document.getElementById('relay-url').value.trim();
+        const relayUrl = relayVal || relayUrlFromCp(location.origin);
         const secretKey = document.getElementById('secret-key').value.trim();
 
         if (!secretKey) {
@@ -436,7 +474,7 @@
         const myAgentId = client ? client.agentId() : '';
         const container = document.getElementById('agents-list');
         if (agents.length === 0) {
-          container.innerHTML = '<p style="color:#888; font-size:0.8rem;">No agents found in your group.</p>';
+          container.innerHTML = '<p style="color:var(--overlay1); font-size:0.8rem;">No agents found in your group.</p>';
           return;
         }
         container.innerHTML = agents.map(a => {
@@ -444,7 +482,7 @@
           const caps = (a.capabilities || []).map(c => c.name).join(', ') || 'none';
           const desc = a.description ? ` — ${a.description}` : '';
           return `<div class="agent-card${isSelf ? ' self' : ''}" ${isSelf ? '' : `onclick="selectAgent('${a.agent_id}')"`}>
-            <span class="agent-name">${a.name}</span>${desc}${isSelf ? ' <span style="color:#888;">(you)</span>' : ''}
+            <span class="agent-name">${a.name}</span>${desc}${isSelf ? ' <span style="color:var(--overlay1);">(you)</span>' : ''}
             <div class="agent-aid">${a.agent_id}</div>
             <div class="agent-caps">${caps}</div>
           </div>`;
