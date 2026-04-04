@@ -366,10 +366,27 @@ impl MeshNode {
                     };
 
                     if let Some(reply_to) = envelope.in_reply_to {
-                        // Response message — route to pending map.
                         let mut pending = self.shared_pending.lock().await;
                         if let Some(tx) = pending.remove(&reply_to) {
+                            // Matched a pending request (e.g. initiator waiting for msg2).
                             let _ = tx.send(envelope);
+                        } else {
+                            // No pending entry — this is likely a handshake msg3
+                            // arriving at the responder side. Fall through to
+                            // handle_message so the Noise session can be completed.
+                            drop(pending);
+                            let raw = text;
+                            if let Err(e) = self
+                                .handle_message(
+                                    &raw,
+                                    &self.shared_sink,
+                                    &self.shared_sessions,
+                                    keypair,
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = %e, "message handling error");
+                            }
                         }
                     } else {
                         // Request message — delegate to handle_message.
