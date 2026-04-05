@@ -222,6 +222,70 @@ To enable `meshctl login`, create a GitHub OAuth App:
    OAUTH_CLIENT_SECRET=<your-client-secret>
    ```
 
+## MCP Integration
+
+Expose your self-hosted mesh agents as MCP tools for AI coding assistants.
+
+### Prerequisites
+
+```bash
+cargo install --path crates/agent-meshctl --features mcp-server
+agent-meshctl login --cp-url https://your-server.example.com
+```
+
+### Streamable HTTP mode
+
+```bash
+# Start MCP server (requires meshd running)
+agent-meshctl mcp-server --listen 127.0.0.1:8090
+```
+
+`.mcp.json` configuration:
+
+```json
+{
+  "mcpServers": {
+    "agent-mesh": {
+      "type": "http",
+      "url": "http://127.0.0.1:8090/mcp",
+      "headersHelper": "agent-meshctl auth-header"
+    }
+  }
+}
+```
+
+### stdio mode
+
+```json
+{
+  "mcpServers": {
+    "agent-mesh": {
+      "type": "stdio",
+      "command": "agent-meshctl",
+      "args": ["mcp-server", "--stdio"]
+    }
+  }
+}
+```
+
+### Authentication
+
+`auth-header` reads the bearer token from `~/.mesh/config.toml` (saved by `meshctl login`). No additional environment variables are needed.
+
+For environments where `meshctl login` is not available, set `MESH_MCP_TOKEN` explicitly:
+
+```bash
+MESH_MCP_TOKEN=your-token agent-meshctl mcp-server
+```
+
+### Architecture
+
+```
+AI Assistant → MCP (HTTP/stdio) → meshctl → meshd (UDS) → Relay → Agent
+```
+
+MCP Adapter does not connect to the relay directly — all traffic flows through meshd (Single Point of Enforcement). meshd handles relay connection, ACL enforcement, and E2E encryption.
+
 ## Endpoints
 
 | Path | Description |
@@ -237,3 +301,4 @@ To enable `meshctl login`, create a GitHub OAuth App:
 | `/acl/*` | ACL rule management |
 | `/setup-keys/*` | Setup Key management |
 | `/` | PWA client (if `--pwa-dir` is set) |
+| `/mcp` | MCP Streamable HTTP endpoint (via `meshctl mcp-server`, not agent-mesh-server) |

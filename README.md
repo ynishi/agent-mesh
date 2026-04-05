@@ -221,7 +221,72 @@ Run `--help` on each binary for full options. `agent-meshd` also supports `--con
 | `agent-mesh-sdk` | `MeshClient` + `MeshAgent` — E2E encrypted requests, streaming, cancellation |
 | `agent-mesh-registry` | REST API for Agent Card CRUD, capability search, liveness enrichment |
 | `agent-mesh-server` | All-in-one server (registry + relay) for hosted or self-hosted deployment |
-| `agent-meshctl` | CLI — `login`, `register`, `discover`, `request`, `status`, `revoke`, `rotate`, `acl`, `group`, `setup-key`, `up` |
+| `agent-meshctl` | CLI — `login`, `register`, `discover`, `request`, `status`, `revoke`, `rotate`, `acl`, `group`, `setup-key`, `up`, `mcp-server`, `auth-header` |
+
+## MCP Integration
+
+agent-mesh exposes mesh agent capabilities as MCP (Model Context Protocol) tools, enabling AI coding assistants (Claude Code, Cursor, etc.) to interact with mesh agents directly.
+
+### Setup
+
+```bash
+# Build meshctl with MCP support
+cargo install --path crates/agent-meshctl --features mcp-server
+
+# Login (required for authentication)
+agent-meshctl login
+```
+
+### Option A: Streamable HTTP (recommended for persistent servers)
+
+```bash
+# Start MCP server (listens on 127.0.0.1:8090 by default)
+agent-meshctl mcp-server
+```
+
+Add to your `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "agent-mesh": {
+      "type": "http",
+      "url": "http://127.0.0.1:8090/mcp",
+      "headersHelper": "agent-meshctl auth-header"
+    }
+  }
+}
+```
+
+`auth-header` reads the login token from `~/.mesh/config.toml` — no environment variable needed.
+
+### Option B: stdio (recommended for Claude Code subprocess mode)
+
+No separate server process needed. Claude Code spawns meshctl directly.
+
+```json
+{
+  "mcpServers": {
+    "agent-mesh": {
+      "type": "stdio",
+      "command": "agent-meshctl",
+      "args": ["mcp-server", "--stdio"]
+    }
+  }
+}
+```
+
+### How it works
+
+MCP Adapter is a thin protocol translation layer sitting in front of meshd (the local daemon). It translates MCP `tools/list` and `tools/call` into meshd Local API calls.
+
+```
+Claude Code → MCP (HTTP/stdio) → meshctl → meshd (UDS) → Relay → Target Agent
+```
+
+- Tool names follow `{agent_id_prefix}__{capability_name}` format (e.g., `a1b2c3d4__scheduling`)
+- Tool list is dynamically fetched from meshd's connected agents (cached with 60s TTL)
+- Authentication: Bearer token from `meshctl login`, passed via `headersHelper` (HTTP) or implicit (stdio)
 
 ## License
 
