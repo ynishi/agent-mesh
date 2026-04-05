@@ -46,6 +46,7 @@ export default defineConfig({
       "/relay": "http://localhost:8080",
       "/agents": "http://localhost:8080",
       "/oauth": "http://localhost:8080",
+      "/health": "http://localhost:8080",
     },
   },
 });

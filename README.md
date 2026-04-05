@@ -222,6 +222,8 @@ Run `--help` on each binary for full options. `agent-meshd` also supports `--con
 | `agent-mesh-registry` | REST API for Agent Card CRUD, capability search, liveness enrichment |
 | `agent-mesh-server` | All-in-one server (registry + relay) for hosted or self-hosted deployment |
 | `agent-meshctl` | CLI — `login`, `register`, `discover`, `request`, `status`, `revoke`, `rotate`, `acl`, `group`, `setup-key`, `up`, `mcp-server`, `auth-header` |
+| `agent-mesh-wasm` | Cross-platform WASM client — browser (via `web-sys::WebSocket`) and native (via `tokio-tungstenite`) |
+| `pwa/` | Browser Chat UI (React + Vite) — connects via WASM client, OAuth login, agent discovery, chat messaging |
 
 ## MCP Integration
 

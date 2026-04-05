@@ -13,6 +13,17 @@ export interface LogEntry {
   level: "info" | "error" | "send" | "recv";
 }
 
+/** A single chat message. */
+export interface ChatMessage {
+  id: string;
+  direction: "sent" | "received";
+  agentId: string;
+  agentName?: string;
+  capability: string;
+  payload: string;
+  timestamp: Date;
+}
+
 /** Device flow response from /oauth/device. */
 export interface DeviceFlowData {
   device_code: string;

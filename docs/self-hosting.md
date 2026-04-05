@@ -306,6 +306,111 @@ This exposes `mesh__get_messages` and `mesh__reply_message` tools. The MCP clien
 
 For headless or SDK use cases, you can skip MCP entirely and connect a simple HTTP server directly to meshd's `--local-agent` endpoint.
 
+## PWA Development (Chat UI)
+
+The PWA provides a browser-based Chat UI for interacting with mesh agents. It connects via WASM client to the relay and uses the CP REST API for OAuth login and agent discovery.
+
+### Architecture
+
+```
+Browser (PWA + WASM Client)
+  ├── OAuth login       → CP /oauth/*
+  ├── Agent discovery   → CP /agents
+  └── Chat (E2E encrypted) → Relay /relay/ws
+```
+
+### Development mode
+
+The Vite dev server proxies API and WebSocket requests to the backend, avoiding CORS issues.
+
+```bash
+cd pwa
+npm install
+npx vite dev --host
+```
+
+By default, the proxy targets `http://localhost:8080`. To point at a different server (e.g., fly.dev), edit `pwa/vite.config.ts`:
+
+```typescript
+server: {
+  proxy: {
+    "/relay": {
+      target: "https://agent-mesh.fly.dev",
+      changeOrigin: true,
+      ws: true,
+    },
+    "/agents": {
+      target: "https://agent-mesh.fly.dev",
+      changeOrigin: true,
+    },
+    "/oauth": {
+      target: "https://agent-mesh.fly.dev",
+      changeOrigin: true,
+    },
+    "/health": {
+      target: "https://agent-mesh.fly.dev",
+      changeOrigin: true,
+    },
+  },
+},
+```
+
+### Testing with a local server
+
+Full local testing requires OAuth credentials (GitHub OAuth App) for login. Start the server with OAuth enabled:
+
+```bash
+./target/release/agent-mesh-server \
+  --listen 0.0.0.0:8080 \
+  --db-path mesh.db \
+  --oauth-provider github \
+  --oauth-client-id <YOUR_CLIENT_ID> \
+  --oauth-client-secret <YOUR_CLIENT_SECRET>
+```
+
+Then open `http://localhost:5173` and click "Login with GitHub".
+
+### Testing against the hosted instance
+
+If you have a `meshctl login` session against `https://agent-mesh.fly.dev`, you can test locally by pointing the Vite proxy at fly.dev (see config above), then opening `http://localhost:5173`.
+
+### Setting up an echo agent for testing
+
+Register an agent and start a local echo server to verify Chat UI end-to-end:
+
+```bash
+# 1. Generate a keypair
+agent-meshctl keygen
+# → Agent ID:   <ECHO_AGENT_ID>
+# → Secret Key: <ECHO_SECRET>
+
+# 2. Register the agent
+agent-meshctl register --name "echo-bot" --capabilities "echo,chat" \
+  --secret-key <ECHO_SECRET>
+
+# 3. Start echo HTTP server (port 9002)
+python3 scripts/echo_server.py 9002 echo-bot
+
+# 4. Start meshd to connect echo-bot to the relay
+agent-meshd \
+  --relay wss://agent-mesh.fly.dev/relay/ws \
+  --local-agent http://127.0.0.1:9002 \
+  --secret-key <ECHO_SECRET> \
+  --cp-url https://agent-mesh.fly.dev
+```
+
+For a self-hosted server, replace the URLs accordingly:
+
+```bash
+agent-meshd \
+  --relay wss://your-server.example.com/relay/ws \
+  --local-agent http://127.0.0.1:9002 \
+  --secret-key <ECHO_SECRET> \
+  --cp-url https://your-server.example.com
+```
+
+Once connected, the echo-bot appears in the Agent dropdown in the PWA. Select it, choose a capability (echo/chat), and send a message.
+
 ## Endpoints
 
 | Path | Description |

@@ -8,9 +8,40 @@ import { useApi } from "./hooks/useApi";
 import { StatusBar, type ConnectionStatus } from "./components/StatusBar";
 import { Login } from "./components/Login";
 import { AgentInfo } from "./components/AgentInfo";
-import { AgentList } from "./components/AgentList";
-import { RequestForm } from "./components/RequestForm";
+import { ChatView } from "./components/ChatView";
 import { Log } from "./components/Log";
+
+function Collapsible({ title, defaultOpen, children }: {
+  title: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen ?? false);
+  return (
+    <section style={{ marginBottom: "0.75rem" }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "0.4rem",
+          width: "100%",
+          background: "none",
+          border: "none",
+          color: mocha.subtext0,
+          fontSize: "0.8rem",
+          cursor: "pointer",
+          padding: "0.25rem 0",
+          textAlign: "left",
+        }}
+      >
+        <span style={{ fontSize: "0.6rem" }}>{open ? "\u25BC" : "\u25B6"}</span>
+        {title}
+      </button>
+      {open && <div style={{ marginTop: "0.25rem" }}>{children}</div>}
+    </section>
+  );
+}
 
 export function App() {
   const [cpUrl, setCpUrl] = useState("");
@@ -20,7 +51,6 @@ export function App() {
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [statusMsg, setStatusMsg] = useState("Not logged in");
   const [agents, setAgents] = useState<AgentCard[]>([]);
-  const [targetId, setTargetId] = useState("");
 
   const { entries, log } = useLog();
   const { cp, relay } = useApi(cpUrl);
@@ -33,7 +63,6 @@ export function App() {
       setStatus("connected");
       const id = c.agentId();
       setStatusMsg(`Connected as ${id.substring(0, 12)}...`);
-      // Load agents if we have a token
       if (apiToken) loadAgents(apiToken);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -66,11 +95,6 @@ export function App() {
     }
   }
 
-  function handleSelectAgent(agentId: string) {
-    setTargetId(agentId);
-    log(`Selected target: ${agentId.substring(0, 16)}...`);
-  }
-
   return (
     <div
       style={{
@@ -86,39 +110,32 @@ export function App() {
       <header
         style={{
           background: mocha.mantle,
-          padding: "1rem",
+          padding: "0.75rem 1rem",
           textAlign: "center",
           borderBottom: `1px solid ${mocha.surface0}`,
         }}
       >
-        <h1 style={{ fontSize: "1.2rem", color: mocha.mauve, margin: 0 }}>
+        <h1 style={{ fontSize: "1.1rem", color: mocha.mauve, margin: 0 }}>
           agent-mesh
         </h1>
-        <p
-          style={{
-            fontSize: "0.8rem",
-            color: mocha.overlay1,
-            marginTop: "0.25rem",
-          }}
-        >
-          Private mesh network for AI agents
-        </p>
       </header>
 
       <main
         style={{
           flex: 1,
-          padding: "1rem",
+          display: "flex",
+          flexDirection: "column",
+          padding: "0.75rem",
           maxWidth: 600,
           margin: "0 auto",
           width: "100%",
+          minHeight: 0,
         }}
       >
         <StatusBar status={status} message={statusMsg} />
 
         {!client ? (
           <>
-            {/* CP URL input */}
             <section style={{ marginBottom: "1.5rem" }}>
               <label
                 style={{
@@ -151,36 +168,33 @@ export function App() {
             <Login
               cp={cp}
               relay={relay}
-
               log={log}
               onConnected={handleConnected}
             />
           </>
         ) : (
           <>
-            <AgentInfo
-              agentId={client.agentId()}
-              secretHex={secretHex}
-              log={log}
-            />
-            {token && (
-              <AgentList
-                agents={agents}
-                myAgentId={client.agentId()}
-                onSelect={handleSelectAgent}
-                onRefresh={() => loadAgents()}
+            <Collapsible title="Agent Info">
+              <AgentInfo
+                agentId={client.agentId()}
+                secretHex={secretHex}
+                log={log}
               />
-            )}
-            <RequestForm
+            </Collapsible>
+
+            <ChatView
               client={client}
-              targetId={targetId}
-              onTargetChange={setTargetId}
+              agents={agents}
+              myAgentId={client.agentId()}
+              onRefreshAgents={() => loadAgents()}
               log={log}
             />
           </>
         )}
 
-        <Log entries={entries} />
+        <Collapsible title="Log">
+          <Log entries={entries} />
+        </Collapsible>
       </main>
     </div>
   );
