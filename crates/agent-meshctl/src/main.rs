@@ -125,6 +125,13 @@ enum Commands {
         #[arg(long)]
         secret_key: Option<String>,
     },
+    /// Output authorization headers as JSON for MCP headersHelper.
+    ///
+    /// Reads bearer_token from ~/.mesh/config.toml (set by `meshctl login`)
+    /// and outputs `{"Authorization": "Bearer <token>"}` to stdout.
+    /// No meshd required.
+    #[cfg(feature = "mcp-server")]
+    AuthHeader,
     /// Start MCP server for remote MCP clients.
     ///
     /// By default, starts a Streamable HTTP server. Use --stdio for subprocess mode
@@ -277,6 +284,17 @@ async fn main() -> Result<()> {
                 },
         } => commands::acl_json(&source, &target, &allow),
         #[cfg(feature = "mcp-server")]
+        Commands::AuthHeader => {
+            let mesh_dir = MeshCredentials::default_mesh_dir()?;
+            let creds = MeshCredentials::load(&mesh_dir)?;
+            let token = creds
+                .bearer_token
+                .ok_or_else(|| anyhow::anyhow!("not logged in — run `meshctl login` first"))?;
+            let headers = serde_json::json!({ "Authorization": format!("Bearer {token}") });
+            println!("{}", headers);
+            Ok(())
+        }
+        #[cfg(feature = "mcp-server")]
         Commands::McpServer { listen, stdio } => {
             let client = daemon::ensure_meshd(sock_path).await?;
             if stdio {
@@ -366,6 +384,8 @@ async fn main() -> Result<()> {
                 | Commands::Register { .. }
                 | Commands::Discover { .. } => unreachable!(),
                 // Already handled above (mcp-server feature arm)
+                #[cfg(feature = "mcp-server")]
+                Commands::AuthHeader => unreachable!(),
                 #[cfg(feature = "mcp-server")]
                 Commands::McpServer { .. } => unreachable!(),
             }
