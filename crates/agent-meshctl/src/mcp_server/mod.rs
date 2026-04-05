@@ -165,6 +165,23 @@ impl ServerHandler for MeshMcpServer {
     }
 }
 
+/// Start the MCP server over stdio (stdin/stdout).
+///
+/// Used when Claude Code (or other MCP clients) spawns meshctl as a subprocess.
+/// No authentication is needed since the parent process owns the pipes.
+#[cfg(feature = "mcp-server")]
+pub async fn serve_stdio(client: MeshdClient) -> anyhow::Result<()> {
+    use rmcp::ServiceExt;
+    let server = MeshMcpServer::new(client);
+    let service = server
+        .serve(rmcp::transport::io::stdio())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to start MCP stdio server: {e}"))?;
+    tracing::info!("MCP stdio server running");
+    service.waiting().await?;
+    Ok(())
+}
+
 /// Start the MCP Streamable HTTP server.
 ///
 /// Binds to `listen_addr`, optionally enforces Bearer token authentication,

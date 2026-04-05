@@ -72,7 +72,7 @@ chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"
 
 # MCP
-rmcp = { version = "1.3.0", features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "1.3.0", features = ["server", "transport-streamable-http-server", "transport-io"] }
 schemars = "1"
 
 # Misc

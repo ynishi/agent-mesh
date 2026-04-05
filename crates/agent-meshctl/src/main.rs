@@ -125,12 +125,18 @@ enum Commands {
         #[arg(long)]
         secret_key: Option<String>,
     },
-    /// Start MCP Streamable HTTP server for remote MCP clients.
+    /// Start MCP server for remote MCP clients.
+    ///
+    /// By default, starts a Streamable HTTP server. Use --stdio for subprocess mode
+    /// (used when Claude Code spawns meshctl directly).
     #[cfg(feature = "mcp-server")]
     McpServer {
-        /// Listen address (default: 127.0.0.1:8090).
+        /// Listen address for HTTP mode (default: 127.0.0.1:8090).
         #[arg(long, default_value = "127.0.0.1:8090")]
         listen: std::net::SocketAddr,
+        /// Use stdio transport instead of HTTP (for subprocess mode).
+        #[arg(long)]
+        stdio: bool,
     },
 }
 
@@ -271,19 +277,23 @@ async fn main() -> Result<()> {
                 },
         } => commands::acl_json(&source, &target, &allow),
         #[cfg(feature = "mcp-server")]
-        Commands::McpServer { listen } => {
+        Commands::McpServer { listen, stdio } => {
             let client = daemon::ensure_meshd(sock_path).await?;
-            // Token fallback chain:
-            // 1. MESH_MCP_TOKEN env (explicit override)
-            // 2. ~/.mesh/config.toml bearer_token (from meshctl login)
-            // 3. None → no auth (development mode)
-            let token = std::env::var("MESH_MCP_TOKEN").ok().or_else(|| {
-                MeshCredentials::default_mesh_dir()
-                    .and_then(|d| MeshCredentials::load(&d))
-                    .ok()
-                    .and_then(|c| c.bearer_token)
-            });
-            agent_meshctl::mcp_server::serve(client, listen, token).await
+            if stdio {
+                agent_meshctl::mcp_server::serve_stdio(client).await
+            } else {
+                // Token fallback chain:
+                // 1. MESH_MCP_TOKEN env (explicit override)
+                // 2. ~/.mesh/config.toml bearer_token (from meshctl login)
+                // 3. None → no auth (development mode)
+                let token = std::env::var("MESH_MCP_TOKEN").ok().or_else(|| {
+                    MeshCredentials::default_mesh_dir()
+                        .and_then(|d| MeshCredentials::load(&d))
+                        .ok()
+                        .and_then(|c| c.bearer_token)
+                });
+                agent_meshctl::mcp_server::serve(client, listen, token).await
+            }
         }
         _ => {
             let client = daemon::ensure_meshd(sock_path).await?;
