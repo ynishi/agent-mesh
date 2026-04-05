@@ -6,6 +6,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "WASM/PWA client for agent-mesh — cross-platform WebSocket connectivity"
+keywords = ["agent", "mesh", "wasm", "websocket", "cryptography"]
+categories = ["wasm", "network-programming", "api-bindings"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
