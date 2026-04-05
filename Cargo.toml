@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["Yutaka Nishimura"]
@@ -22,10 +22,10 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/ynishi/agent-mesh"
 
 [workspace.dependencies]
-agent-mesh-core = { path = "crates/agent-mesh-core", version = "0.2.2" }
-agent-mesh-relay = { path = "crates/agent-mesh-relay", version = "0.2.2" }
-agent-mesh-registry = { path = "crates/agent-mesh-registry", version = "0.2.2" }
-agent-mesh-sdk = { path = "crates/agent-mesh-sdk", version = "0.2.2" }
+agent-mesh-core = { path = "crates/agent-mesh-core", version = "0.3.0" }
+agent-mesh-relay = { path = "crates/agent-mesh-relay", version = "0.3.0" }
+agent-mesh-registry = { path = "crates/agent-mesh-registry", version = "0.3.0" }
+agent-mesh-sdk = { path = "crates/agent-mesh-sdk", version = "0.3.0" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

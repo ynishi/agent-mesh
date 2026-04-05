@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-05
+
+### Added
+
+- **MCP Server** — `meshctl mcp-server` exposes mesh agent capabilities as MCP tools (Streamable HTTP and stdio transport)
+- **Dynamic tool discovery** — MCP `tools/list` fetches agent capabilities from meshd with 60s TTL cache
+- **MCP tool invocation** — MCP `tools/call` routes to mesh agents via meshd `POST /request`
+- **Bearer token auth middleware** — Optional token validation for HTTP mode, disabled in stdio mode
+- **Token fallback chain** — `MESH_MCP_TOKEN` env → `~/.mesh/config.toml` bearer_token → no auth (development)
+- **stdio transport** — `--stdio` flag for subprocess mode (Claude Code spawns meshctl directly)
+- **`meshctl auth-header`** — Outputs `{"Authorization": "Bearer <token>"}` for MCP `headersHelper`, eliminating env var setup
+- **Inbound message receive** — `--receive-port` enables pull-based message reception from other mesh agents via `mesh__get_messages` / `mesh__reply_message` tools
+- **MCP documentation** — README and self-hosting guide updated with setup instructions for both transport modes
+
+### Changed
+
+- **meshctl commands** — Added `mcp-server` and `auth-header` subcommands (behind `mcp-server` feature flag)
+- **meshctl Cargo.toml** — `mcp-server` feature adds `rmcp`, `schemars`, `axum`, `uuid` as optional dependencies
+
 ## [0.2.2] - 2026-04-04
 
 ### Added
@@ -47,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Noise_XX handshake msg3 routing** — Messages with `in_reply_to` but no matching pending entry (e.g. handshake msg3 at the responder) now fall through to `handle_message()` instead of being silently dropped, fixing E2E encrypted communication
 
+[0.3.0]: https://github.com/ynishi/agent-mesh/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/ynishi/agent-mesh/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/ynishi/agent-mesh/compare/v0.2.0...v0.2.1
 
