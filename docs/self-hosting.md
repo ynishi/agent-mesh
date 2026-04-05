@@ -286,6 +286,26 @@ AI Assistant → MCP (HTTP/stdio) → meshctl → meshd (UDS) → Relay → Agen
 
 MCP Adapter does not connect to the relay directly — all traffic flows through meshd (Single Point of Enforcement). meshd handles relay connection, ACL enforcement, and E2E encryption.
 
+### Receiving messages
+
+To receive incoming requests from other mesh agents via MCP:
+
+```bash
+# Start MCP server with receive endpoint
+agent-meshctl mcp-server --receive-port 9100
+
+# Point meshd at the receive endpoint
+agent-meshd \
+  --relay wss://your-server.example.com/relay/ws \
+  --local-agent http://127.0.0.1:9100 \
+  --secret-key <YOUR_SECRET_KEY> \
+  --cp-url https://your-server.example.com
+```
+
+This exposes `mesh__get_messages` and `mesh__reply_message` tools. The MCP client polls for messages and replies within a 25s window.
+
+For headless or SDK use cases, you can skip MCP entirely and connect a simple HTTP server directly to meshd's `--local-agent` endpoint.
+
 ## Endpoints
 
 | Path | Description |

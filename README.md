@@ -288,6 +288,43 @@ Claude Code → MCP (HTTP/stdio) → meshctl → meshd (UDS) → Relay → Targe
 - Tool list is dynamically fetched from meshd's connected agents (cached with 60s TTL)
 - Authentication: Bearer token from `meshctl login`, passed via `headersHelper` (HTTP) or implicit (stdio)
 
+### Receiving messages from other agents
+
+By default the MCP Adapter only sends requests (outbound). To also receive incoming requests from other mesh agents, add `--receive-port`:
+
+```bash
+# Start MCP server with receive endpoint
+agent-meshctl mcp-server --receive-port 9100
+
+# Point meshd at the receive endpoint
+agent-meshd --local-agent http://127.0.0.1:9100 ...
+```
+
+For stdio mode, add it to `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "agent-mesh-stdio": {
+      "type": "stdio",
+      "command": "agent-meshctl",
+      "args": ["mcp-server", "--stdio", "--receive-port", "9100"]
+    }
+  }
+}
+```
+
+When enabled, two additional MCP tools appear:
+
+- `mesh__get_messages` — pull pending inbound messages (returns JSON array, may be empty)
+- `mesh__reply_message` — send a reply back to the calling agent (`message_id` + `payload`)
+
+**Flow**: incoming request arrives at the receive endpoint → queued → MCP client calls `get_messages` to pull → processes the message → calls `reply_message` with the response → reply is delivered back to the calling agent via meshd/relay. If no reply is sent within 25 seconds, the calling agent receives a timeout error.
+
+This works well with periodic polling (e.g., shell loop, Claude Code `/loop`), or any MCP client that calls `get_messages` on a schedule.
+
+For headless or SDK use cases, connect directly to meshd's `--local-agent` HTTP endpoint — no MCP layer needed. A simple HTTP server that accepts POST and returns JSON is sufficient.
+
 ## License
 
 Licensed under either of

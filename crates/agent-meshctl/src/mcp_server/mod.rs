@@ -2,6 +2,8 @@ pub mod convert;
 
 #[cfg(feature = "mcp-server")]
 mod auth;
+#[cfg(feature = "mcp-server")]
+pub mod inbound;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +20,8 @@ use rmcp::service::RequestContext;
 use rmcp::RoleServer;
 use tokio::sync::RwLock;
 
+#[cfg(feature = "mcp-server")]
+use self::inbound::InboundQueue;
 use crate::daemon::MeshdClient;
 use convert::{agent_cards_to_tools, resolve_tool_target};
 
@@ -49,10 +53,16 @@ impl ToolCache {
 ///
 /// Dynamically exposes agent capabilities as MCP tools by querying `GET /agents`
 /// via `MeshdClient` and caching the result for up to 60 seconds.
+/// Built-in tool names for inbound message handling.
+const TOOL_GET_MESSAGES: &str = "mesh__get_messages";
+const TOOL_REPLY_MESSAGE: &str = "mesh__reply_message";
+
 #[derive(Clone)]
 pub struct MeshMcpServer {
     client: Arc<MeshdClient>,
     cache: Arc<RwLock<ToolCache>>,
+    /// Inbound message queue (None if receive endpoint is not enabled).
+    inbound: Option<InboundQueue>,
 }
 
 impl MeshMcpServer {
@@ -61,6 +71,16 @@ impl MeshMcpServer {
         Self {
             client: Arc::new(client),
             cache: Arc::new(RwLock::new(ToolCache::new())),
+            inbound: None,
+        }
+    }
+
+    /// Create a new `MeshMcpServer` with inbound message support.
+    pub fn with_inbound(client: MeshdClient, inbound: InboundQueue) -> Self {
+        Self {
+            client: Arc::new(client),
+            cache: Arc::new(RwLock::new(ToolCache::new())),
+            inbound: Some(inbound),
         }
     }
 
@@ -116,7 +136,36 @@ impl ServerHandler for MeshMcpServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         let cache = self.cache.read().await;
-        Ok(ListToolsResult::with_all_items(cache.tools.clone()))
+        let mut tools = cache.tools.clone();
+
+        // Add inbound tools if receive endpoint is enabled.
+        if self.inbound.is_some() {
+            tools.push(Tool::new(
+                TOOL_GET_MESSAGES,
+                "Retrieve pending inbound messages from other mesh agents. Returns an array of messages (may be empty).",
+                Arc::new({
+                    let mut m = serde_json::Map::new();
+                    m.insert("type".into(), serde_json::json!("object"));
+                    m
+                }),
+            ));
+            tools.push(Tool::new(
+                TOOL_REPLY_MESSAGE,
+                "Send a reply to a pending inbound message. The reply is delivered back to the calling agent.",
+                Arc::new({
+                    let mut m = serde_json::Map::new();
+                    m.insert("type".into(), serde_json::json!("object"));
+                    m.insert("properties".into(), serde_json::json!({
+                        "message_id": { "type": "string", "description": "ID of the message to reply to (from get_messages)" },
+                        "payload": { "type": "object", "description": "Reply payload to send back to the calling agent" }
+                    }));
+                    m.insert("required".into(), serde_json::json!(["message_id", "payload"]));
+                    m
+                }),
+            ));
+        }
+
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
     async fn call_tool(
@@ -124,6 +173,43 @@ impl ServerHandler for MeshMcpServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        let tool_name: &str = &request.name;
+
+        // ── Inbound tools ────────────────────────────────────────────────
+        if let Some(ref queue) = self.inbound {
+            if tool_name == TOOL_GET_MESSAGES {
+                let messages = queue.drain_messages().await;
+                let json = serde_json::to_string(&messages)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                return Ok(CallToolResult::success(vec![Content::text(json)]));
+            }
+            if tool_name == TOOL_REPLY_MESSAGE {
+                let args = request
+                    .arguments
+                    .as_ref()
+                    .ok_or_else(|| McpError::invalid_params("missing arguments", None))?;
+                let message_id = args
+                    .get("message_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::invalid_params("missing message_id", None))?;
+                let payload = args
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                let delivered = queue.submit_reply(message_id, payload).await;
+                if delivered {
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        r#"{"status":"sent"}"#,
+                    )]));
+                } else {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        r#"{"error":"message_not_found_or_expired"}"#,
+                    )]));
+                }
+            }
+        }
+
+        // ── Outbound tools (agent capabilities) ─────────────────────────
         // 1. Refresh cache if stale.
         self.refresh_if_stale()
             .await
@@ -169,10 +255,22 @@ impl ServerHandler for MeshMcpServer {
 ///
 /// Used when Claude Code (or other MCP clients) spawns meshctl as a subprocess.
 /// No authentication is needed since the parent process owns the pipes.
+///
+/// If `receive_port` is provided, a receive HTTP endpoint is started alongside
+/// the stdio transport. meshd's `--local-agent` should point to this port.
 #[cfg(feature = "mcp-server")]
-pub async fn serve_stdio(client: MeshdClient) -> anyhow::Result<()> {
+pub async fn serve_stdio(client: MeshdClient, receive_port: Option<u16>) -> anyhow::Result<()> {
     use rmcp::ServiceExt;
-    let server = MeshMcpServer::new(client);
+
+    let server = if let Some(port) = receive_port {
+        let queue = InboundQueue::new();
+        let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+        tokio::spawn(inbound::start_receive_server(addr, queue.clone()));
+        MeshMcpServer::with_inbound(client, queue)
+    } else {
+        MeshMcpServer::new(client)
+    };
+
     let service = server
         .serve(rmcp::transport::io::stdio())
         .await
@@ -186,18 +284,30 @@ pub async fn serve_stdio(client: MeshdClient) -> anyhow::Result<()> {
 ///
 /// Binds to `listen_addr`, optionally enforces Bearer token authentication,
 /// and serves MCP requests via the rmcp Streamable HTTP transport.
+///
+/// If `receive_port` is provided, a receive HTTP endpoint is started alongside
+/// the MCP server. meshd's `--local-agent` should point to this port.
 /// Shuts down gracefully on Ctrl-C.
 #[cfg(feature = "mcp-server")]
 pub async fn serve(
     client: MeshdClient,
     listen_addr: std::net::SocketAddr,
     token: Option<String>,
+    receive_port: Option<u16>,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
 
-    let server = MeshMcpServer::new(client);
+    let server = if let Some(port) = receive_port {
+        let queue = InboundQueue::new();
+        let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+        tokio::spawn(inbound::start_receive_server(addr, queue.clone()));
+        MeshMcpServer::with_inbound(client, queue)
+    } else {
+        MeshMcpServer::new(client)
+    };
+
     let service = StreamableHttpService::new(
         move || Ok(server.clone()),
         Arc::new(LocalSessionManager::default()),

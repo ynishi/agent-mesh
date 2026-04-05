@@ -144,6 +144,10 @@ enum Commands {
         /// Use stdio transport instead of HTTP (for subprocess mode).
         #[arg(long)]
         stdio: bool,
+        /// Enable inbound message receive endpoint on this port.
+        /// meshd's --local-agent should point to http://127.0.0.1:<port>.
+        #[arg(long)]
+        receive_port: Option<u16>,
     },
 }
 
@@ -295,10 +299,14 @@ async fn main() -> Result<()> {
             Ok(())
         }
         #[cfg(feature = "mcp-server")]
-        Commands::McpServer { listen, stdio } => {
+        Commands::McpServer {
+            listen,
+            stdio,
+            receive_port,
+        } => {
             let client = daemon::ensure_meshd(sock_path).await?;
             if stdio {
-                agent_meshctl::mcp_server::serve_stdio(client).await
+                agent_meshctl::mcp_server::serve_stdio(client, receive_port).await
             } else {
                 // Token fallback chain:
                 // 1. MESH_MCP_TOKEN env (explicit override)
@@ -310,7 +318,7 @@ async fn main() -> Result<()> {
                         .ok()
                         .and_then(|c| c.bearer_token)
                 });
-                agent_meshctl::mcp_server::serve(client, listen, token).await
+                agent_meshctl::mcp_server::serve(client, listen, token, receive_port).await
             }
         }
         _ => {
