@@ -43,14 +43,7 @@ export function ChatView({ client, agents, myAgentId, onRefreshAgents, log }: Pr
         agents={agents}
         myAgentId={myAgentId}
         targetId={targetId}
-        onTargetChange={(id) => {
-          setTargetId(id);
-          const agent = agents.find((a) => a.agent_id === id);
-          const caps = agent?.capabilities?.map((c) => c.name) ?? [];
-          if (caps.length > 0 && !caps.includes(capability) && caps[0]) {
-            setCapability(caps[0]);
-          }
-        }}
+        onTargetChange={setTargetId}
         capability={capability}
         onCapabilityChange={setCapability}
         targetCaps={targetCaps}

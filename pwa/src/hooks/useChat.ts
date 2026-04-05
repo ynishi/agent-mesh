@@ -23,18 +23,30 @@ export function useChat(
 ) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sending, setSending] = useState(false);
-  const [targetId, setTargetId] = useState("");
+  const [targetId, setTargetIdRaw] = useState("");
   const [capability, setCapability] = useState("chat");
 
   const targetAgent = agents.find((a) => a.agent_id === targetId);
   const targetCaps = targetAgent?.capabilities?.map((c) => c.name) ?? [];
+
+  const setTargetId = useCallback(
+    (id: string) => {
+      setTargetIdRaw(id);
+      const agent = agents.find((a) => a.agent_id === id);
+      const caps = agent?.capabilities?.map((c) => c.name) ?? [];
+      if (caps.length > 0 && !caps.includes(capability) && caps[0]) {
+        setCapability(caps[0]);
+      }
+    },
+    [agents, capability],
+  );
 
   const send = useCallback(
     async (input: string) => {
       if (!client || !targetId.trim() || !input.trim()) return;
 
       const payloadStr = buildPayload(capability, input);
-      const msgId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const msgId = crypto.randomUUID();
 
       const sent: ChatMessage = {
         id: msgId,
