@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-04-16
+
+### Added
+
+- **PWA Chat UI** — Replaced the single-shot request form with a conversational Chat UI supporting multi-turn dialogue with mesh agents
+- **Collapsible component** — Extracted reusable `<Collapsible>` from Chat UI for consistent fold/unfold sections
+
+### Fixed
+
+- **agent-mesh-wasm metadata** — Added missing `keywords` and `categories` to Cargo.toml for crates.io discoverability
+
+### Security
+
+- **rustls-webpki** 0.103.10 → 0.103.12 — Fixes X.509 name-constraint verification bugs (GHSA-965h-392x-2mh5, GHSA-xgp8-3hg3-c2mh). Affects TLS certificate validation on the relay/CP connection
+
+### Changed
+
+- **rand** 0.9.2 → 0.9.4 and 0.10.0 → 0.10.1 — Pulls in upstream soundness fix (RUSTSEC-2026-0097 relevant scenarios); not exploitable in agent-mesh's normal paths but kept current
+
+[0.3.1]: https://github.com/ynishi/agent-mesh/compare/v0.3.0...v0.3.1
+
 ## [0.3.0] - 2026-04-05
 
 ### Added
