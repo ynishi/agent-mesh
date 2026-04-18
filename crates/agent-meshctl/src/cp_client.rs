@@ -71,6 +71,20 @@ impl CpClient {
         let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
         Ok((status, body))
     }
+
+    /// DELETE request with Bearer auth. Success responses (e.g. 204 No Content)
+    /// typically carry no body, so the returned JSON may be `Null`.
+    pub async fn delete(&self, path: &str) -> Result<(reqwest::StatusCode, serde_json::Value)> {
+        let url = format!("{}{path}", self.base_url);
+        let mut req = self.http.delete(&url);
+        if let Some(ref token) = self.bearer_token {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+        let resp = req.send().await.context("failed to reach Control Plane")?;
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        Ok((status, body))
+    }
 }
 
 fn default_mesh_dir() -> Result<PathBuf> {

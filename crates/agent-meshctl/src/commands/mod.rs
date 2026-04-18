@@ -1,4 +1,5 @@
 pub mod acl;
+pub mod deregister;
 pub mod discover;
 pub mod group;
 pub mod keygen;
@@ -11,6 +12,7 @@ pub mod setup_key;
 pub mod status;
 
 pub use self::acl::{acl_create, acl_delete, acl_list};
+pub use self::deregister::deregister;
 pub use self::discover::discover;
 pub use self::group::{group_add_member, group_create, group_list, group_remove_member};
 pub use self::keygen::keygen;

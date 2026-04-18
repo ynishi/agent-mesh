@@ -41,6 +41,16 @@ enum Commands {
         #[arg(long)]
         secret_key: Option<String>,
     },
+    /// Delete an agent card from the registry (parallel to `register`).
+    ///
+    /// Only removes the card. The underlying Ed25519 key stays usable — use
+    /// `revoke` instead to block the key and disconnect every card sharing it.
+    /// The `id` is the AgentCard UUID (see `discover` output), not the agent_id.
+    Deregister {
+        /// AgentCard UUID to delete.
+        #[arg(long)]
+        id: String,
+    },
     /// Search for agents in the registry.
     Discover {
         /// Filter by capability name.
@@ -279,6 +289,10 @@ async fn main() -> Result<()> {
             let cp = CpClient::from_config(None)?;
             commands::discover(&cp, capability.as_deref(), search.as_deref()).await
         }
+        Commands::Deregister { id } => {
+            let cp = CpClient::from_config(None)?;
+            commands::deregister(&cp, &id).await
+        }
         Commands::Acl {
             subcommand:
                 AclCommands::Json {
@@ -390,7 +404,8 @@ async fn main() -> Result<()> {
                 Commands::Keygen
                 | Commands::Login { .. }
                 | Commands::Register { .. }
-                | Commands::Discover { .. } => unreachable!(),
+                | Commands::Discover { .. }
+                | Commands::Deregister { .. } => unreachable!(),
                 // Already handled above (mcp-server feature arm)
                 #[cfg(feature = "mcp-server")]
                 Commands::AuthHeader => unreachable!(),
