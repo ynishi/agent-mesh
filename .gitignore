@@ -5,7 +5,10 @@ workspace
 .ryo
 .claude
 *.db
+*.db-shm
+*.db-wal
 .env
 pwa/node_modules
 pwa/dist
 pwa/pkg
+.mcp.json
