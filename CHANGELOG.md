@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-04-18
+
+### Added
+
+- **`meshctl deregister`** — New CLI command that invokes `DELETE /agents/{id}` on the Control Plane to remove a single AgentCard by its UUID. Complements `register`: unlike `revoke`, the underlying Ed25519 key stays usable, so cards sharing the same key are unaffected. Required because `register` does not upsert — repeat registrations under the same `agent_id` otherwise leak stale cards with no CLI path to clean them up
+- **`CpClient::delete()`** — DELETE HTTP helper added alongside `get`/`post` in the meshctl CP client (Bearer auth, JSON body optional)
+
+[0.3.2]: https://github.com/ynishi/agent-mesh/compare/v0.3.1...v0.3.2
+
 ## [0.3.1] - 2026-04-16
 
 ### Added
