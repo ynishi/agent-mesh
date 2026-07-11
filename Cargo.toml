@@ -20,6 +20,9 @@ rust-version = "1.85"
 authors = ["Yutaka Nishimura"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ynishi/agent-mesh"
+homepage = "https://github.com/ynishi/agent-mesh"
+documentation = "https://docs.rs/agent-mesh-core"
+description = "Secure agent-to-agent mesh network with E2E encryption (Noise + Ed25519)"
 
 [workspace.dependencies]
 agent-mesh-core = { path = "crates/agent-mesh-core", version = "0.3.2" }
