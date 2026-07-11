@@ -1,3 +1,34 @@
+//! Control-plane HTTP API: Agent Card registry, capability search, and
+//! account/authorization management for agent-mesh.
+//!
+//! # Architecture
+//!
+//! `agent-mesh-registry` is the "control plane" in the mesh — it does not
+//! route agent-to-agent traffic (that is `agent-mesh-relay`'s job); it holds
+//! the durable state the rest of the network needs to establish trust:
+//!
+//! - [`db`] — [`db::Database`], a SQLite-backed store (via `rusqlite`) for
+//!   users, groups, agent cards, ACL rules, setup keys, and key revocations.
+//! - [`routes`] — HTTP handlers for OAuth device-flow login, agent
+//!   registration/discovery, group and ACL management, and gate
+//!   verification. Split across sub-modules per resource (`agents`, `groups`,
+//!   `acl`, `setup_keys`, `revocations`, `oauth`, `gate`, `status`).
+//! - [`auth`] — [`auth::require_auth`] Bearer-token middleware and token
+//!   hashing shared by the authenticated route layer.
+//! - [`sync`] — [`sync::SyncHub`] WebSocket endpoint that pushes
+//!   `agent_mesh_core::sync::SyncMessage` state snapshots to connected
+//!   `agent-meshd` instances as state changes.
+//!
+//! [`app`] assembles three router layers with different auth requirements:
+//! `public` (no auth), `authed` (Bearer token via [`auth::require_auth`]),
+//! and `setup_key_routes` (verifies a Setup Key inline in the handler
+//! instead of via middleware — see [`routes::agents::register_with_setup_key`]
+//! for the rationale). This crate depends on `agent-mesh-core` for all wire
+//! and identity types; it does not depend on `agent-mesh-relay` or
+//! `agent-meshd` — the dependency runs the other way, over HTTP/WebSocket:
+//! `agent-mesh-relay` calls this crate's `/gate/verify` endpoint to
+//! authorize connecting agents, and `agent-meshd` calls it for registration
+//! and state sync.
 pub mod auth;
 pub mod db;
 pub mod routes;
@@ -59,8 +90,12 @@ pub struct AppState {
 /// - `public`: no authentication required (health, oauth)
 /// - `authed`: requires Bearer token via `require_auth` middleware
 /// - `setup_key_routes`: Setup Key endpoints — `/register-with-key` verifies
-///   the Setup Key directly inside the handler (architecture.md §11.1,
-///   BP: Tailscale/NetBird). No auth middleware is applied here intentionally.
+///   the Setup Key directly inside the handler. No auth middleware is
+///   applied here intentionally: the caller does not have a Bearer token
+///   yet (registration *produces* one), so `require_auth` cannot run first.
+///   This mirrors Tailscale's Auth Key and NetBird's Setup Key, which are
+///   likewise verified inline by the registration endpoint rather than by a
+///   generic auth layer.
 pub fn app(state: AppState) -> Router {
     let public = Router::new()
         .route("/health", get(health))
@@ -111,8 +146,9 @@ pub fn app(state: AppState) -> Router {
             auth::require_auth,
         ));
 
-    // Setup Key registration endpoint: no Bearer auth middleware.
-    // The handler verifies the Setup Key directly (architecture.md §11.1).
+    // Setup Key registration endpoint: no Bearer auth middleware, since the
+    // Setup Key itself is what the caller is exchanging for a Bearer token.
+    // The handler verifies the Setup Key directly instead.
     let setup_key_routes = Router::new().route(
         "/register-with-key",
         post(routes::agents::register_with_setup_key),

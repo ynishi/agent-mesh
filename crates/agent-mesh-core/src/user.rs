@@ -83,7 +83,10 @@ pub struct SetupKey {
     /// Unique ID for this setup key.
     ///
     /// Plain `Uuid` is used here instead of a Newtype because setup keys are
-    /// never mixed with other ID types (architecture.md §3.3).
+    /// never mixed with other ID types: unlike `AgentId`/`UserId`/`GroupId`,
+    /// a `SetupKey`'s id is never passed around alongside a different kind
+    /// of id where a Newtype's type-safety would prevent mix-ups (see the
+    /// key separation table above).
     pub id: Uuid,
     /// SHA-256 hash of the raw key (plaintext shown only at issuance).
     pub key_hash: String,

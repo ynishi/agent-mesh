@@ -1,3 +1,27 @@
+//! WebSocket relay server: routes opaque, Noise-encrypted envelopes between
+//! connected agents without ever seeing their plaintext payloads.
+//!
+//! # Architecture
+//!
+//! The relay only sees message routing metadata (`from`/`to`) on the
+//! [`agent_mesh_core::message::MeshEnvelope`] wire type from `agent-mesh-core`;
+//! payload confidentiality is enforced end-to-end by the Noise session
+//! between the two agents, not by the relay.
+//!
+//! - [`hub`] — [`hub::Hub`], the central in-memory router: tracks connected
+//!   agent WebSocket sessions, buffers messages for offline agents (bounded),
+//!   applies per-agent rate limiting, and reaps dead sessions.
+//! - [`ws`] — the Axum WebSocket upgrade handler ([`ws::ws_handler`]) that
+//!   authenticates an incoming connection and hands it off to [`hub::Hub`].
+//! - [`gate`] — [`GateVerifier`], the trait the relay uses to authorize a
+//!   connecting agent against the control plane (`agent-mesh-registry`) via
+//!   its `/gate/verify` endpoint; decouples the relay from a specific
+//!   registry deployment.
+//! - [`config`] — [`config::RelayConfig`], process-level configuration.
+//!
+//! The relay depends on `agent-mesh-core` for identity and envelope types
+//! and, at runtime (via [`gate::HttpGateVerifier`]), on an `agent-mesh-registry`
+//! deployment reachable over HTTP for connection authorization.
 pub mod config;
 pub mod gate;
 pub mod hub;
