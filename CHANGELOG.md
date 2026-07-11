@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.4.0] - 2026-07-11
+
+### Added
+
+- **SECURITY.md** — Vulnerability reporting policy routing private reports through GitHub Security Advisories
+- **CI** — GitHub Actions workflow (rustfmt check, clippy with `-D warnings`, workspace tests, cargo-deny) plus a `deny.toml` audit config
+- **Release tooling** — `justfile` (test / check / deny / release-plan / release-publish) and `scripts/publish.sh`, a guarded dependency-ordered crates.io publish driver: plan mode by default with preflight assertions (clean tree, `v{version}` tag matching HEAD), publishing only with the explicit `--execute` flag
+- **`AclRuleId`** — Newtype in `agent-mesh-core` for ACL rule identifiers, following the `AgentId` pattern (transparent serde, `from_raw` / `as_str`)
+- **Documentation** — Crate-level architecture overviews (`//!`) for every crate and rustdoc for all public items; `#![warn(missing_docs)]` is now enforced workspace-wide, so undocumented public items fail CI
+
+### Changed
+
+- **BREAKING (registry lib)** — `Database::get_agent_group_id` and `Database::is_revoked` take `&AgentId` instead of `&str`; `AclRuleRow.id` and `AclRuleResponse.id` are typed `AclRuleId`. The JSON wire format is unchanged
+- **BREAKING (meshd lib)** — cp_sync entry points (`cp_sync_loop`, `connect_and_sync`, `apply_sync_event`) take a single `CpSyncShared` handle instead of five separate `Arc<RwLock<...>>` parameters; lock granularity and acquisition order are unchanged
+- **registry internals** — `db.rs` (2,394 lines) split into nine domain submodules as pure code motion; route DTOs and DB rows use core newtypes (`AgentId` / `GroupId` / `UserId`) instead of raw strings
+- **Dependencies** — Duplicated deps (hex, hyper, hyper-util, http-body-util, bytes, tempfile) consolidated into `[workspace.dependencies]`; tokio features narrowed from `full` to the set actually used (rt-multi-thread, macros, net, sync, time, signal)
+- **Workspace metadata** — Added homepage, documentation, and description
+
+### Security
+
+- **anyhow** 1.0.102 → 1.0.103 (RUSTSEC-2026-0190), **rand** 0.8.5 → 0.8.6 (RUSTSEC-2026-0097), **rustls-webpki** 0.103.12 → 0.103.13 (RUSTSEC-2026-0104)
+
+[0.4.0]: https://github.com/ynishi/agent-mesh/compare/v0.3.2...v0.4.0
+
 ## [0.3.2] - 2026-04-18
 
 ### Added

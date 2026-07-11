@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["Yutaka Nishimura"]
@@ -25,12 +25,12 @@ documentation = "https://docs.rs/agent-mesh-core"
 description = "Secure agent-to-agent mesh network with E2E encryption (Noise + Ed25519)"
 
 [workspace.dependencies]
-agent-mesh-core = { path = "crates/agent-mesh-core", version = "0.3.2" }
-agent-mesh-relay = { path = "crates/agent-mesh-relay", version = "0.3.2" }
-agent-mesh-registry = { path = "crates/agent-mesh-registry", version = "0.3.2" }
-agent-mesh-sdk = { path = "crates/agent-mesh-sdk", version = "0.3.2" }
-agent-meshd = { path = "crates/agent-meshd", version = "0.3.2" }
-agent-meshctl = { path = "crates/agent-meshctl", version = "0.3.2" }
+agent-mesh-core = { path = "crates/agent-mesh-core", version = "0.4.0" }
+agent-mesh-relay = { path = "crates/agent-mesh-relay", version = "0.4.0" }
+agent-mesh-registry = { path = "crates/agent-mesh-registry", version = "0.4.0" }
+agent-mesh-sdk = { path = "crates/agent-mesh-sdk", version = "0.4.0" }
+agent-meshd = { path = "crates/agent-meshd", version = "0.4.0" }
+agent-meshctl = { path = "crates/agent-meshctl", version = "0.4.0" }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
