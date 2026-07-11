@@ -33,6 +33,7 @@ impl Database {
 
     // ── Group methods ─────────────────────────────────────────────────────────
 
+    /// Insert a new group row.
     pub fn create_group(&self, group: &Group) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.execute(
@@ -48,6 +49,7 @@ impl Database {
         Ok(())
     }
 
+    /// List all groups `user_id` is a member of.
     pub fn list_groups_for_user(&self, user_id: &UserId) -> Result<Vec<Group>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut stmt = conn.prepare(
@@ -66,6 +68,7 @@ impl Database {
 
     // ── GroupMember methods ───────────────────────────────────────────────────
 
+    /// Insert a group membership row.
     pub fn add_group_member(&self, member: &GroupMember) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.execute(
@@ -80,6 +83,8 @@ impl Database {
         Ok(())
     }
 
+    /// Remove a user's membership in a group. Idempotent: no error if the
+    /// membership does not exist.
     pub fn remove_group_member(&self, group_id: &GroupId, user_id: &UserId) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         // Idempotent delete — no error if the membership does not exist.

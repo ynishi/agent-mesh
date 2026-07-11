@@ -9,6 +9,7 @@ use rusqlite::params;
 use super::Database;
 
 impl Database {
+    /// Insert a new API token row.
     pub fn create_api_token(&self, token: &ApiToken) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let expires_at = token.expires_at.map(|t| t.to_rfc3339());

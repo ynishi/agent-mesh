@@ -25,6 +25,7 @@ pub struct CreateSetupKeyRequest {
 /// The `raw_key` is shown only once; the database stores the hash only.
 #[derive(Serialize)]
 pub struct CreateSetupKeyResponse {
+    /// The stored setup key record (hash only, no plaintext).
     pub setup_key: SetupKey,
     /// Plaintext key — shown only at issuance.
     pub raw_key: String,
@@ -37,6 +38,9 @@ fn generate_raw_key() -> String {
     format!("sk_{hex}")
 }
 
+/// `POST /setup-keys` — issue a new Setup Key. The caller must already be a
+/// member of `group_id`. Returns the record plus the plaintext key, which is
+/// never retrievable again after this response.
 pub async fn create_setup_key(
     State(state): State<AppState>,
     AuthUser(user_id): AuthUser,
@@ -95,6 +99,7 @@ pub async fn create_setup_key(
     ))
 }
 
+/// `GET /setup-keys` — list all Setup Keys owned by the authenticated user.
 pub async fn list_setup_keys(
     State(state): State<AppState>,
     AuthUser(user_id): AuthUser,
@@ -106,6 +111,8 @@ pub async fn list_setup_keys(
     Ok(Json(keys))
 }
 
+/// `DELETE /setup-keys/{id}` — revoke (delete) a Setup Key. `404` if not
+/// found or not owned by the caller.
 pub async fn revoke_setup_key(
     State(state): State<AppState>,
     AuthUser(user_id): AuthUser,

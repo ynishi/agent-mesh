@@ -99,10 +99,12 @@ impl MeshClient {
         self.conn.request_plaintext(target, payload, timeout).await
     }
 
+    /// Returns this client's identity.
     pub fn agent_id(&self) -> AgentId {
         self.conn.agent_id()
     }
 
+    /// Returns the relay WebSocket URL this client is connected to.
     pub fn relay_url(&self) -> &str {
         &self.relay_url
     }

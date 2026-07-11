@@ -22,9 +22,19 @@
 //! The relay depends on `agent-mesh-core` for identity and envelope types
 //! and, at runtime (via [`gate::HttpGateVerifier`]), on an `agent-mesh-registry`
 //! deployment reachable over HTTP for connection authorization.
+#![warn(missing_docs)]
+
+/// Process-level configuration ([`config::RelayConfig`]), loaded from TOML
+/// with defaults for missing fields.
 pub mod config;
+/// Connection authorization: the [`gate::GateVerifier`] trait and its
+/// HTTP-backed / noop implementations.
 pub mod gate;
+/// The central in-memory router ([`hub::Hub`]) that tracks connected
+/// sessions, buffers offline messages, and rate-limits per agent.
 pub mod hub;
+/// Axum WebSocket upgrade handler and the auth/routing loop for a single
+/// connection.
 pub mod ws;
 
 pub use gate::GateVerifier;

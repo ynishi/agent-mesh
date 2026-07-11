@@ -9,6 +9,7 @@ use rusqlite::params;
 use super::Database;
 
 impl Database {
+    /// Insert a new user row.
     pub fn create_user(&self, user: &User) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.execute(
@@ -25,6 +26,7 @@ impl Database {
         Ok(())
     }
 
+    /// Fetch a user by internal ID.
     pub fn get_user_by_id(&self, id: &UserId) -> Result<Option<User>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut stmt = conn.prepare(
@@ -38,6 +40,7 @@ impl Database {
         }
     }
 
+    /// Fetch a user by their OIDC provider's external ID.
     pub fn get_user_by_external_id(&self, external_id: &str) -> Result<Option<User>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut stmt = conn.prepare(

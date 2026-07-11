@@ -8,8 +8,11 @@ use std::path::PathBuf;
 
 /// HTTP client that communicates directly with the Control Plane.
 pub struct CpClient {
+    /// Control Plane base URL (trailing slash stripped).
     pub base_url: String,
+    /// Bearer token used for `Authorization` headers, if authenticated.
     pub bearer_token: Option<String>,
+    /// Shared HTTP client used for all requests.
     pub http: reqwest::Client,
 }
 

@@ -8,6 +8,8 @@ use async_trait::async_trait;
 /// and `Err(...)` on communication or protocol errors.
 #[async_trait]
 pub trait GateVerifier: Send + Sync {
+    /// Check whether `agent_id` is allowed to connect. See the trait-level
+    /// doc for the meaning of the `Ok` variants.
     async fn verify_agent(&self, agent_id: &AgentId) -> anyhow::Result<Option<GroupId>>;
 }
 
@@ -19,6 +21,8 @@ pub struct HttpGateVerifier {
 }
 
 impl HttpGateVerifier {
+    /// Construct a verifier that calls `{cp_url}/gate/verify`, authenticating
+    /// with `cp_token` as a Bearer token, using the given HTTP `client`.
     pub fn new(cp_url: String, cp_token: String, client: reqwest::Client) -> Self {
         Self {
             cp_url,

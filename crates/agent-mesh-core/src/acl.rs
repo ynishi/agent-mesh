@@ -1,3 +1,6 @@
+//! Authorization model: [`AclRule`] / [`AclPolicy`], enforced by meshd
+//! before forwarding a request to the local agent.
+
 use serde::{Deserialize, Serialize};
 
 use crate::identity::AgentId;
@@ -24,6 +27,7 @@ pub struct AclPolicy {
 }
 
 impl AclPolicy {
+    /// Create a new, empty policy with `default_deny = true`.
     pub fn new() -> Self {
         Self {
             default_deny: true,
@@ -41,6 +45,11 @@ impl AclPolicy {
         !self.default_deny
     }
 
+    /// Append a rule to this policy.
+    ///
+    /// Rules are matched in insertion order by [`is_allowed`](Self::is_allowed);
+    /// this method does not deduplicate or merge with existing rules for the
+    /// same `(source, target)` pair.
     pub fn add_rule(&mut self, rule: AclRule) {
         self.rules.push(rule);
     }

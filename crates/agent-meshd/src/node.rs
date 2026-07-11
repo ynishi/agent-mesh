@@ -51,6 +51,11 @@ pub enum NodeState {
     Connected,
 }
 
+/// The daemon's runtime state: relay/CP-sync connections, ACL, active and
+/// pending keypairs, and the [`local_api`] handle used by `agent-meshctl`.
+///
+/// Owns three long-running loops driven concurrently by [`MeshNode::run`]:
+/// the Local API server, the relay reconnect loop, and the CP sync loop.
 pub struct MeshNode {
     /// Current active keypair, wrapped for hot-reload support.
     keypair: Arc<RwLock<AgentKeypair>>,
@@ -84,6 +89,11 @@ pub struct MeshNode {
 }
 
 impl MeshNode {
+    /// Creates a `MeshNode` from `config`, generating a fresh Noise keypair
+    /// and loading any stored credentials from `$HOME/.mesh/`.
+    ///
+    /// See [`MeshNode::new_with_mesh_dir`] to override the credentials
+    /// directory (used by tests).
     pub fn new(config: NodeConfig) -> Result<Self> {
         let keypair = config.keypair()?;
         let noise_keypair =
@@ -147,6 +157,9 @@ impl MeshNode {
 
     // ── Internal helpers ─────────────────────────────────────────────────────
 
+    /// Runs the daemon: the Local API server, the relay reconnect loop, and
+    /// the CP sync loop concurrently. Returns as soon as any one of them
+    /// exits (they are all meant to run forever under normal operation).
     pub async fn run(&self) -> Result<()> {
         tokio::select! {
             r = self.local_api_server() => {

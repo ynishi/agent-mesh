@@ -26,11 +26,16 @@ pub use acl::AclRuleRow;
 pub use revocations::RevocationRow;
 pub use rotation::RotationResult;
 
+/// SQLite-backed persistence handle. Domain methods (users, groups, agent
+/// cards, ACL, setup keys, revocations, key rotation) are implemented on
+/// this type across the submodules of [`crate::db`].
 pub struct Database {
     conn: Mutex<Connection>,
 }
 
 impl Database {
+    /// Open (or create) the SQLite database at `path` and apply schema
+    /// migrations. `path` may be `":memory:"` for an ephemeral database.
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
 

@@ -28,8 +28,17 @@
 //! relay (`agent-mesh-relay`) over WebSocket for message transport, and on
 //! a registry (`agent-mesh-registry`) over HTTP/WebSocket for
 //! authentication and state sync.
+#![warn(missing_docs)]
+
+/// On-disk daemon configuration ([`config::NodeConfig`]) and CP credential
+/// storage ([`config::MeshCredentials`]).
 pub mod config;
+/// Reconnecting WebSocket client for the control plane sync endpoint.
 pub mod cp_sync;
+/// Local-only HTTP API the daemon exposes for `agent-meshctl`.
 pub mod local_api;
+/// The daemon's state machine ([`node::MeshNode`]) and per-peer Noise
+/// session state.
 pub mod node;
+/// Forwards decrypted incoming requests to the local agent's HTTP endpoint.
 pub mod proxy;

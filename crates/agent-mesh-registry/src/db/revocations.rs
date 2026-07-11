@@ -7,6 +7,7 @@ use rusqlite::params;
 use super::Database;
 
 impl Database {
+    /// Insert (or replace, by `agent_id`) a revocation row.
     pub fn create_revocation(&self, rev: &RevocationRow) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.execute(
@@ -24,6 +25,7 @@ impl Database {
         Ok(())
     }
 
+    /// List all revocations, newest first.
     pub fn list_revocations(&self) -> Result<Vec<RevocationRow>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut stmt = conn.prepare(
@@ -55,7 +57,9 @@ impl Database {
 pub struct RevocationRow {
     /// PRIMARY KEY.
     pub agent_id: AgentId,
+    /// Free-text reason for the revocation, if given.
     pub reason: Option<String>,
+    /// User who initiated the revocation.
     pub revoked_by: UserId,
     /// Base64url Ed25519 signature.
     pub signature: String,

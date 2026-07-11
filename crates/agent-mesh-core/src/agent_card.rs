@@ -1,3 +1,6 @@
+//! Capability advertisement ([`AgentCard`]) used by the registry for agent
+//! discovery.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -54,11 +57,16 @@ pub struct AgentCard {
 /// Request to register or update an agent card.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCardRegistration {
+    /// The registering agent's identity.
     pub agent_id: AgentId,
+    /// Human-readable display name.
     pub name: String,
+    /// Description of what this agent does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Capabilities this agent exposes.
     pub capabilities: Vec<Capability>,
+    /// Optional metadata (rate limits, cost, version, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 }

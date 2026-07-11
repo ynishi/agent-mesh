@@ -48,6 +48,7 @@ pub struct SyncHub {
 }
 
 impl SyncHub {
+    /// Create an empty hub with no registered connections.
     pub fn new() -> Self {
         Self {
             connections: RwLock::new(HashMap::new()),
@@ -227,6 +228,7 @@ impl Default for SyncHub {
 /// Query parameters for the `/sync` WebSocket endpoint.
 #[derive(serde::Deserialize)]
 pub struct SyncParams {
+    /// The connecting agent's identity.
     pub agent_id: AgentId,
 }
 

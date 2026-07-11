@@ -18,6 +18,7 @@ pub struct VerifyAgentRequest {
 /// Response when the agent is found.
 #[derive(Serialize)]
 pub struct VerifyAgentResponse {
+    /// Group the agent belongs to.
     pub group_id: GroupId,
 }
 

@@ -91,12 +91,17 @@ pub struct Hub {
     rate_burst: f64,
     /// Gate verifier for agent connection authorization.
     pub gate: Arc<dyn GateVerifier>,
-    /// Counters for metrics.
+    /// Total messages delivered directly to an online agent.
     pub messages_routed: AtomicU64,
+    /// Total messages buffered because the target agent was offline.
     pub messages_buffered: AtomicU64,
+    /// Total messages dropped because the target's buffer was full.
     pub messages_dropped: AtomicU64,
+    /// Total messages rejected because the sender exceeded its rate limit.
     pub messages_rate_limited: AtomicU64,
+    /// Total successful connection authentications.
     pub auth_successes: AtomicU64,
+    /// Total failed connection authentications.
     pub auth_failures: AtomicU64,
 }
 
@@ -113,6 +118,8 @@ pub enum RouteResult {
 }
 
 impl Hub {
+    /// Create an empty Hub with the given per-agent rate limit (`rate`
+    /// tokens/sec, `burst` max tokens) and connection-authorization `gate`.
     pub fn new(rate: f64, burst: f64, gate: Arc<dyn GateVerifier>) -> Self {
         Self {
             agents: RwLock::new(HashMap::new()),

@@ -14,6 +14,8 @@ pub struct MeshdClient {
 }
 
 impl MeshdClient {
+    /// Creates a client bound to `sock_path` (no connection is made until a
+    /// request is sent).
     pub fn new(sock_path: PathBuf) -> Self {
         Self { sock_path }
     }

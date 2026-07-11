@@ -29,9 +29,19 @@
 //! `agent-mesh-relay` calls this crate's `/gate/verify` endpoint to
 //! authorize connecting agents, and `agent-meshd` calls it for registration
 //! and state sync.
+#![warn(missing_docs)]
+
+/// Bearer-token auth middleware ([`auth::require_auth`]) and token hashing
+/// shared by the authenticated route layer.
 pub mod auth;
+/// SQLite-backed persistence ([`db::Database`]) for users, groups, agent
+/// cards, ACL rules, setup keys, and key revocations.
 pub mod db;
+/// HTTP handlers for the registry's public and authenticated routes, split
+/// per resource.
 pub mod routes;
+/// WebSocket push of state-change snapshots to connected `agent-meshd`
+/// instances ([`sync::SyncHub`]).
 pub mod sync;
 
 use axum::middleware;
@@ -45,11 +55,17 @@ use crate::sync::SyncHub;
 /// OAuth provider configuration for Device Flow authentication.
 #[derive(Clone)]
 pub struct OAuthConfig {
+    /// OAuth provider name (currently only `"github"`).
     pub provider: String,
+    /// OAuth application client ID.
     pub client_id: String,
+    /// OAuth application client secret.
     pub client_secret: String,
+    /// Provider endpoint for starting a Device Flow authorization.
     pub device_code_url: String,
+    /// Provider endpoint for exchanging a device code for an access token.
     pub token_url: String,
+    /// Provider endpoint for fetching the authenticated user's profile.
     pub userinfo_url: String,
 }
 
@@ -78,9 +94,13 @@ impl OAuthConfig {
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
+    /// SQLite-backed persistence handle.
     pub db: Arc<Database>,
+    /// OAuth Device Flow configuration, if login is enabled.
     pub oauth_config: Option<OAuthConfig>,
+    /// Shared HTTP client used for outbound OAuth provider calls.
     pub http_client: reqwest::Client,
+    /// WebSocket hub for pushing state-change sync messages.
     pub sync_hub: Arc<SyncHub>,
 }
 

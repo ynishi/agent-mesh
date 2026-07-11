@@ -1,3 +1,19 @@
+//! All-in-one agent-mesh server binary: hosts the registry (control plane)
+//! and relay (WebSocket message forwarding) in a single process, sharing one
+//! SQLite database.
+//!
+//! # Architecture
+//!
+//! - Registry router (`agent_mesh_registry::app`) is mounted at the root
+//!   path and handles account/identity operations (register, login,
+//!   discover, ACL, sync).
+//! - Relay router (`agent_mesh_relay::app`) is nested under `/relay` and
+//!   handles WebSocket message forwarding between connected agents.
+//! - [`InProcessGateVerifier`] lets the relay's ACL gate check group
+//!   membership via direct DB access instead of an HTTP round-trip to the
+//!   registry, since both live in the same process here.
+#![warn(missing_docs)]
+
 use std::sync::Arc;
 
 use agent_mesh_core::identity::{AgentId, GroupId};

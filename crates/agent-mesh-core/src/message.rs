@@ -1,3 +1,6 @@
+//! [`MeshEnvelope`] wire format routed by the relay, plus the relay auth
+//! handshake and key rotation/revocation message types.
+
 use serde::{Deserialize, Serialize};
 
 use crate::identity::{AgentCardId, AgentId, MessageId};
@@ -30,6 +33,7 @@ pub struct MeshEnvelope {
     pub timestamp: i64,
 }
 
+/// The kind of message carried by a [`MeshEnvelope`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageType {
@@ -174,18 +178,21 @@ impl MeshEnvelope {
 /// Step 1: Agent → Relay. Declares identity, requests a challenge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthHello {
+    /// The connecting agent's identity.
     pub agent_id: AgentId,
 }
 
 /// Step 2: Relay → Agent. Sends a random nonce to be signed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthChallenge {
+    /// Random nonce the agent must sign to prove key ownership.
     pub nonce: String,
 }
 
 /// Step 3: Agent → Relay. Returns the signed nonce.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthResponse {
+    /// The connecting agent's identity.
     pub agent_id: AgentId,
     /// Ed25519 signature over the nonce bytes, base64url-encoded.
     pub signature: String,
@@ -194,7 +201,9 @@ pub struct AuthResponse {
 /// Step 4: Relay → Agent. Auth outcome.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthResult {
+    /// Whether authentication succeeded.
     pub success: bool,
+    /// Human-readable failure reason, present when `success` is false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Session token for connection resumption (issued on successful auth).
@@ -206,6 +215,7 @@ pub struct AuthResult {
 /// Sent instead of AuthHello when the agent has a valid session token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthResume {
+    /// The resuming agent's identity.
     pub agent_id: AgentId,
     /// The session token received from a previous AuthResult.
     pub session_token: String,

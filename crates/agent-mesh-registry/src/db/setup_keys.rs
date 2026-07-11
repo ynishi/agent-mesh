@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::Database;
 
 impl Database {
+    /// Insert a new setup key row.
     pub fn create_setup_key(&self, key: &SetupKey) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let usage_str = usage_to_db_str(&key.usage);
@@ -143,6 +144,7 @@ impl Database {
         }))
     }
 
+    /// List all setup keys owned by `user_id`, newest first.
     pub fn list_setup_keys(&self, user_id: &UserId) -> Result<Vec<SetupKey>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut stmt = conn.prepare(

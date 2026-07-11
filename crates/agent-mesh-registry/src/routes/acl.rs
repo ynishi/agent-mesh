@@ -24,11 +24,17 @@ pub struct CreateAclRuleRequest {
 /// API response for a single ACL rule.
 #[derive(Serialize)]
 pub struct AclRuleResponse {
+    /// Rule ID.
     pub id: String,
+    /// Group the rule is scoped to.
     pub group_id: GroupId,
+    /// Agent the rule grants outbound access *from*.
     pub source: AgentId,
+    /// Agent the rule grants access *to*.
     pub target: AgentId,
+    /// Capability names the source may invoke on the target.
     pub allowed_capabilities: Vec<String>,
+    /// RFC 3339 creation timestamp.
     pub created_at: String,
 }
 

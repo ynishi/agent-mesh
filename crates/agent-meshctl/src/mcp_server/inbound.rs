@@ -57,6 +57,7 @@ impl Default for InboundQueue {
 }
 
 impl InboundQueue {
+    /// Creates an empty queue with the default reply timeout (25s).
     pub fn new() -> Self {
         Self {
             ready: Arc::new(Mutex::new(Vec::new())),

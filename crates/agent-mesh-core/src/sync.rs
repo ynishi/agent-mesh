@@ -1,3 +1,6 @@
+//! [`SyncMessage`] / [`SyncEvent`], the state snapshot and incremental
+//! updates the registry (control plane) pushes to connected meshd instances.
+
 use serde::{Deserialize, Serialize};
 
 use crate::acl::AclRule;

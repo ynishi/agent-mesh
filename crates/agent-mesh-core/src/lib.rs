@@ -25,6 +25,8 @@
 //! - [`sync`] — [`sync::SyncMessage`], the state snapshot the registry
 //!   (control plane) pushes to connected meshd instances.
 //! - [`error`] — shared [`error::ProtoError`] type used across the above.
+#![warn(missing_docs)]
+
 pub mod acl;
 pub mod agent_card;
 pub mod error;

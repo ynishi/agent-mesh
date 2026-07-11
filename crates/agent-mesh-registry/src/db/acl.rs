@@ -8,6 +8,7 @@ use rusqlite::params;
 use super::Database;
 
 impl Database {
+    /// Insert a new ACL rule row.
     pub fn create_acl_rule(&self, rule: &AclRuleRow) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.execute(
@@ -26,6 +27,7 @@ impl Database {
         Ok(())
     }
 
+    /// List all ACL rules for a group, oldest first.
     pub fn list_acl_rules_for_group(&self, group_id: &GroupId) -> Result<Vec<AclRuleRow>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut stmt = conn.prepare(
@@ -57,12 +59,17 @@ impl Database {
 /// DB row representation for an ACL rule.
 /// Distinct from `agent_mesh_core::acl::AclRule` — this is the persistence layer struct.
 pub struct AclRuleRow {
+    /// Rule ID (UUID string).
     pub id: String,
+    /// Group the rule is scoped to.
     pub group_id: GroupId,
+    /// Agent the rule grants outbound access *from*.
     pub source: AgentId,
+    /// Agent the rule grants access *to*.
     pub target: AgentId,
     /// JSON array of capability names.
     pub allowed_capabilities: String,
+    /// User who created the rule.
     pub created_by: UserId,
     /// RFC 3339 timestamp string.
     pub created_at: String,

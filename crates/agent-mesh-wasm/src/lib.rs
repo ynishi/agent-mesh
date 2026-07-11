@@ -4,6 +4,7 @@
 //!
 //! Uses `tokio-tungstenite-wasm` which wraps `web-sys::WebSocket` on wasm32
 //! and `tokio-tungstenite` on native — same API for both targets.
+#![warn(missing_docs)]
 
 mod client;
 mod error;

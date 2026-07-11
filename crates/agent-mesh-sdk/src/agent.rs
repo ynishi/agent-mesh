@@ -68,6 +68,8 @@ impl CancelNotifier {
 /// The `cancel` token allows checking if the client has cancelled the request.
 #[async_trait::async_trait]
 pub trait RequestHandler: Send + Sync + 'static {
+    /// Handle a single (non-streaming) request and return its response
+    /// payload.
     async fn handle(
         &self,
         from: &AgentId,
@@ -200,6 +202,7 @@ impl MeshAgent {
         self.conn.request_stream(target, payload, timeout).await
     }
 
+    /// Returns this agent's identity.
     pub fn agent_id(&self) -> AgentId {
         self.conn.agent_id()
     }

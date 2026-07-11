@@ -28,6 +28,7 @@ pub struct NodeConfig {
 }
 
 impl NodeConfig {
+    /// Load a `NodeConfig` from a JSON file at `path`.
     pub fn load(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config: {path}"))?;
@@ -91,6 +92,7 @@ impl NodeConfig {
         Ok(config.acl)
     }
 
+    /// Decode `secret_key_hex` into an [`AgentKeypair`].
     pub fn keypair(&self) -> Result<AgentKeypair> {
         let bytes = hex::decode(&self.secret_key_hex).with_context(|| "invalid secret_key_hex")?;
         let arr: [u8; 32] = bytes
@@ -99,6 +101,8 @@ impl NodeConfig {
         Ok(AgentKeypair::from_bytes(&arr))
     }
 
+    /// Returns the agent ID derived from `secret_key_hex`, or
+    /// `"<invalid key>"` if the key cannot be decoded.
     pub fn agent_id_display(&self) -> String {
         match self.keypair() {
             Ok(kp) => kp.agent_id().to_string(),
@@ -131,7 +135,9 @@ impl NodeConfig {
 /// node config file.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct MeshCredentials {
+    /// Bearer token issued by the control plane after OAuth login.
     pub bearer_token: Option<String>,
+    /// Control Plane URL this token was issued for.
     pub cp_url: Option<String>,
 }
 

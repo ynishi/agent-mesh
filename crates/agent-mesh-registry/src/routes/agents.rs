@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::auth::{hash_token, AuthUser};
 use crate::AppState;
 
+/// `POST /agents` — register a new agent card owned by the authenticated
+/// user in their default group. Returns `201` with the created card.
 pub async fn register_agent(
     State(state): State<AppState>,
     AuthUser(user_id): AuthUser,
@@ -27,6 +29,7 @@ pub async fn register_agent(
     Ok((StatusCode::CREATED, Json(card)))
 }
 
+/// `GET /agents/{id}` — fetch a single agent card by ID. `404` if not found.
 pub async fn get_agent(
     State(state): State<AppState>,
     AuthUser(_user_id): AuthUser,
@@ -43,6 +46,8 @@ pub async fn get_agent(
     }
 }
 
+/// `GET /agents` — search agent cards, scoped to the authenticated user's
+/// group memberships (any `group_ids` in the query is overwritten).
 pub async fn search_agents(
     State(state): State<AppState>,
     AuthUser(user_id): AuthUser,
@@ -63,6 +68,8 @@ pub async fn search_agents(
     Ok(Json(cards))
 }
 
+/// `PUT /agents/{id}` — update an agent card's mutable fields. `403` if the
+/// caller is not the card's owner, `404` if the card does not exist.
 pub async fn update_agent(
     State(state): State<AppState>,
     AuthUser(user_id): AuthUser,
@@ -91,6 +98,8 @@ pub async fn update_agent(
     }
 }
 
+/// `DELETE /agents/{id}` — delete an agent card. `403` if the caller is not
+/// the card's owner, `404` if the card does not exist.
 pub async fn delete_agent(
     State(state): State<AppState>,
     AuthUser(user_id): AuthUser,
@@ -129,14 +138,18 @@ pub async fn delete_agent(
 pub struct RegisterWithSetupKeyRequest {
     /// Plaintext setup key (e.g. `sk_...`).
     pub setup_key: String,
+    /// Identity of the agent being registered.
     pub agent_id: AgentId,
+    /// Display name for the agent card.
     pub name: String,
+    /// Capabilities the agent exposes.
     pub capabilities: Vec<Capability>,
 }
 
 /// Response for registering an agent with a Setup Key.
 #[derive(Serialize)]
 pub struct RegisterWithSetupKeyResponse {
+    /// The newly created agent card.
     pub agent_card: AgentCard,
     /// Plaintext ApiToken — shown only once at registration.
     pub api_token: String,
@@ -157,6 +170,9 @@ fn generate_raw_api_token() -> String {
 /// the credential it would check. This endpoint therefore lives in the
 /// third router layer (`setup_key_routes`) which has no Bearer auth
 /// middleware.
+///
+/// `POST /register-with-key` — register an agent card and issue a fresh
+/// API token for the setup key's owner, in one call.
 pub async fn register_with_setup_key(
     State(state): State<AppState>,
     Json(req): Json<RegisterWithSetupKeyRequest>,
@@ -210,9 +226,14 @@ pub async fn register_with_setup_key(
 /// Response body for `POST /agents/{card_id}/rotate-key`.
 #[derive(Serialize)]
 pub struct RotateKeyResponse {
+    /// The agent card the rotation was initiated for.
     pub card_id: AgentCardId,
+    /// The agent's identity before rotation (still active).
     pub old_agent_id: AgentId,
+    /// The pending new identity, active once rotation completes.
     pub new_agent_id: AgentId,
+    /// RFC 3339 timestamp when the grace period (and thus the old key's
+    /// validity) ends.
     pub rotation_expires_at: String,
 }
 
@@ -287,9 +308,13 @@ pub async fn rotate_key(
 /// Response body for `POST /agents/{card_id}/complete-rotation`.
 #[derive(Serialize)]
 pub struct CompleteRotationResponse {
+    /// The agent card the rotation was completed for.
     pub card_id: AgentCardId,
+    /// The agent's identity before rotation (now revoked).
     pub old_agent_id: AgentId,
+    /// The agent's identity after rotation.
     pub new_agent_id: AgentId,
+    /// Number of ACL rules rewritten (source + target combined).
     pub acl_rules_updated: usize,
 }
 

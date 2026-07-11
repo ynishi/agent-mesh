@@ -1,3 +1,6 @@
+//! Ed25519 agent identity ([`AgentKeypair`] / [`AgentId`]) and UUID newtypes
+//! for cards, messages, users, and groups.
+
 use std::fmt;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -13,6 +16,7 @@ use crate::error::ProtoError;
 pub struct AgentId(String);
 
 impl AgentId {
+    /// Derive an `AgentId` from an Ed25519 verifying (public) key.
     pub fn from_verifying_key(key: &VerifyingKey) -> Self {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine;
@@ -24,10 +28,15 @@ impl AgentId {
         Self(s)
     }
 
+    /// Returns the base64url-encoded public key as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Decode this `AgentId` back into an Ed25519 verifying key.
+    ///
+    /// Fails if the string is not valid base64url, does not decode to
+    /// exactly 32 bytes, or is not a valid Ed25519 point.
     pub fn to_verifying_key(&self) -> Result<VerifyingKey, ProtoError> {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine;
@@ -51,13 +60,18 @@ impl fmt::Display for AgentId {
 /// Newtype wrapper for AgentCard UUIDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct AgentCardId(pub Uuid);
+pub struct AgentCardId(
+    /// The underlying UUID.
+    pub Uuid,
+);
 
 impl AgentCardId {
+    /// Generate a new random (v4) `AgentCardId`.
     pub fn new_v4() -> Self {
         Self(Uuid::new_v4())
     }
 
+    /// Parse an `AgentCardId` from its UUID string representation.
     pub fn parse_str(s: &str) -> Result<Self, uuid::Error> {
         Uuid::parse_str(s).map(Self)
     }
@@ -72,13 +86,18 @@ impl fmt::Display for AgentCardId {
 /// Newtype wrapper for Message UUIDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct MessageId(pub Uuid);
+pub struct MessageId(
+    /// The underlying UUID.
+    pub Uuid,
+);
 
 impl MessageId {
+    /// Generate a new random (v4) `MessageId`.
     pub fn new_v4() -> Self {
         Self(Uuid::new_v4())
     }
 
+    /// Parse a `MessageId` from its UUID string representation.
     pub fn parse_str(s: &str) -> Result<Self, uuid::Error> {
         Uuid::parse_str(s).map(Self)
     }
@@ -93,13 +112,18 @@ impl fmt::Display for MessageId {
 /// Newtype wrapper for User UUIDs (reserved for v0.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct UserId(pub Uuid);
+pub struct UserId(
+    /// The underlying UUID.
+    pub Uuid,
+);
 
 impl UserId {
+    /// Generate a new random (v4) `UserId`.
     pub fn new_v4() -> Self {
         Self(Uuid::new_v4())
     }
 
+    /// Parse a `UserId` from its UUID string representation.
     pub fn parse_str(s: &str) -> Result<Self, uuid::Error> {
         Uuid::parse_str(s).map(Self)
     }
@@ -114,13 +138,18 @@ impl fmt::Display for UserId {
 /// Newtype wrapper for Group UUIDs (reserved for v0.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct GroupId(pub Uuid);
+pub struct GroupId(
+    /// The underlying UUID.
+    pub Uuid,
+);
 
 impl GroupId {
+    /// Generate a new random (v4) `GroupId`.
     pub fn new_v4() -> Self {
         Self(Uuid::new_v4())
     }
 
+    /// Parse a `GroupId` from its UUID string representation.
     pub fn parse_str(s: &str) -> Result<Self, uuid::Error> {
         Uuid::parse_str(s).map(Self)
     }
@@ -145,30 +174,37 @@ impl Clone for AgentKeypair {
 }
 
 impl AgentKeypair {
+    /// Generate a fresh Ed25519 keypair using the OS random number
+    /// generator.
     pub fn generate() -> Self {
         Self {
             signing_key: SigningKey::generate(&mut OsRng),
         }
     }
 
+    /// Reconstruct a keypair from its 32-byte secret seed.
     pub fn from_bytes(secret: &[u8; 32]) -> Self {
         Self {
             signing_key: SigningKey::from_bytes(secret),
         }
     }
 
+    /// Derive this keypair's [`AgentId`] from its public key.
     pub fn agent_id(&self) -> AgentId {
         AgentId::from_verifying_key(&self.signing_key.verifying_key())
     }
 
+    /// Sign a message with this keypair's private key.
     pub fn sign(&self, message: &[u8]) -> Signature {
         self.signing_key.sign(message)
     }
 
+    /// Returns the Ed25519 public (verifying) key.
     pub fn verifying_key(&self) -> VerifyingKey {
         self.signing_key.verifying_key()
     }
 
+    /// Returns the raw 32-byte secret key.
     pub fn secret_bytes(&self) -> &[u8; 32] {
         self.signing_key.as_bytes()
     }

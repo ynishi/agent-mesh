@@ -25,39 +25,51 @@ use crate::identity::{GroupId, UserId};
 /// A user authenticated via OAuth.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
+    /// Registry-assigned unique ID.
     pub id: UserId,
     /// Provider-scoped external identifier, e.g. `"github:12345"`.
     pub external_id: String,
     /// OAuth provider name, e.g. `"github"` or `"google"`.
     pub provider: String,
+    /// Display name reported by the OAuth provider, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// When this user first authenticated.
     pub created_at: DateTime<Utc>,
 }
 
 /// Visibility and communication boundary for a set of agents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Group {
+    /// Registry-assigned unique ID.
     pub id: GroupId,
+    /// Human-readable display name.
     pub name: String,
     /// The user who created this group.
     pub created_by: UserId,
+    /// When this group was created.
     pub created_at: DateTime<Utc>,
 }
 
 /// Association between a user and a group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupMember {
+    /// The group being joined.
     pub group_id: GroupId,
+    /// The member's user identity.
     pub user_id: UserId,
+    /// The member's permission level within the group.
     pub role: GroupRole,
 }
 
 /// Permission level of a user within a group.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GroupRole {
+    /// Full control, including membership and role management.
     Owner,
+    /// Can manage group resources but not ownership/membership.
     Admin,
+    /// Standard group member with no administrative privileges.
     Member,
 }
 
@@ -69,8 +81,11 @@ pub enum GroupRole {
 pub struct ApiToken {
     /// SHA-256 hash of the raw token.
     pub token_hash: String,
+    /// The user this token authenticates as.
     pub user_id: UserId,
+    /// When this token was issued.
     pub created_at: DateTime<Utc>,
+    /// When this token expires, if it has an expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
 }
@@ -95,11 +110,14 @@ pub struct SetupKey {
     pub user_id: UserId,
     /// Agents registered via this key are automatically placed in this group.
     pub group_id: GroupId,
+    /// Whether this key is single-use or reusable up to a limit.
     pub usage: SetupKeyUsage,
     /// Remaining uses for a `Reusable` key; `None` for `OneOff`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uses_remaining: Option<u32>,
+    /// When this key was issued.
     pub created_at: DateTime<Utc>,
+    /// When this key expires and can no longer be used.
     pub expires_at: DateTime<Utc>,
 }
 
@@ -109,7 +127,10 @@ pub enum SetupKeyUsage {
     /// Single-use; automatically invalidated after one registration.
     OneOff,
     /// Can be used up to `max_uses` times.
-    Reusable { max_uses: u32 },
+    Reusable {
+        /// Maximum number of registrations this key may authorize.
+        max_uses: u32,
+    },
 }
 
 #[cfg(test)]

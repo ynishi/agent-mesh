@@ -10,9 +10,13 @@ use super::Database;
 
 /// Result returned by [`Database::complete_key_rotation`].
 pub struct RotationResult {
+    /// The agent card whose key was rotated.
     pub card_id: AgentCardId,
+    /// The agent's identity before rotation (now revoked).
     pub old_agent_id: AgentId,
+    /// The agent's identity after rotation.
     pub new_agent_id: AgentId,
+    /// The group the agent card belongs to.
     pub group_id: GroupId,
     /// Number of ACL rules rewritten (source + target combined).
     pub acl_rules_updated: usize,

@@ -1,3 +1,4 @@
+/// Converts `AgentCard` capabilities into MCP `Tool` definitions and back.
 pub mod convert;
 
 #[cfg(feature = "mcp-server")]
@@ -49,14 +50,14 @@ impl ToolCache {
     }
 }
 
+// Built-in tool names for inbound message handling.
+const TOOL_GET_MESSAGES: &str = "mesh__get_messages";
+const TOOL_REPLY_MESSAGE: &str = "mesh__reply_message";
+
 /// MCP server adapter that bridges rmcp and the meshd Local API.
 ///
 /// Dynamically exposes agent capabilities as MCP tools by querying `GET /agents`
 /// via `MeshdClient` and caching the result for up to 60 seconds.
-/// Built-in tool names for inbound message handling.
-const TOOL_GET_MESSAGES: &str = "mesh__get_messages";
-const TOOL_REPLY_MESSAGE: &str = "mesh__reply_message";
-
 #[derive(Clone)]
 pub struct MeshMcpServer {
     client: Arc<MeshdClient>,

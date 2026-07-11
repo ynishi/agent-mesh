@@ -19,6 +19,8 @@
 //! error surface. This crate depends only on `agent-mesh-core` for identity
 //! and message types — it never talks to the registry (control plane)
 //! directly, only to a relay.
+#![warn(missing_docs)]
+
 mod agent;
 mod client;
 pub(crate) mod connection;

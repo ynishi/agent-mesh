@@ -17,10 +17,15 @@ use crate::AppState;
 /// API response for a single revocation record.
 #[derive(Serialize)]
 pub struct RevocationResponse {
+    /// The revoked agent's identity.
     pub agent_id: AgentId,
+    /// Free-text reason for the revocation, if given.
     pub reason: Option<String>,
+    /// User who submitted the revocation.
     pub revoked_by: UserId,
+    /// Unix millis at which the revocation was signed.
     pub timestamp: i64,
+    /// RFC 3339 timestamp when the record was stored.
     pub created_at: String,
 }
 

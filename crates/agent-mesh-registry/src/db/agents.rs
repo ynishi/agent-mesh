@@ -9,6 +9,7 @@ use rusqlite::params;
 use super::Database;
 
 impl Database {
+    /// Insert a new agent card row owned by `owner_id` in `group_id`.
     pub fn register(
         &self,
         reg: &AgentCardRegistration,
@@ -58,6 +59,7 @@ impl Database {
         })
     }
 
+    /// Fetch a single agent card by its card ID.
     pub fn get_by_id(&self, id: &AgentCardId) -> Result<Option<AgentCard>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut stmt = conn.prepare(
@@ -71,6 +73,10 @@ impl Database {
         }
     }
 
+    /// Search agent cards by optional `agent_id` / free-text `search` /
+    /// `capability` / `group_ids` filters (all AND-combined), newest-updated
+    /// first, capped at 100 results. `group_ids: Some(vec![])` short-circuits
+    /// to an empty result (explicit "no groups" scope, not "unscoped").
     pub fn search(&self, query: &AgentCardQuery) -> Result<Vec<AgentCard>> {
         // If group_ids is explicitly set to an empty list, no groups match — return early.
         if let Some(ref group_ids) = query.group_ids {
@@ -135,6 +141,11 @@ impl Database {
         Ok(cards)
     }
 
+    /// Update an existing agent card's mutable fields (name, description,
+    /// capabilities, metadata). Returns `Ok(None)` if `id` does not exist,
+    /// and errors if `reg.agent_id` does not match the card's current
+    /// `agent_id` (agent identity is immutable via this path; see key
+    /// rotation in [`super::rotation`] for identity changes).
     pub fn update(
         &self,
         id: &AgentCardId,
@@ -188,6 +199,7 @@ impl Database {
         self.get_by_id(id)
     }
 
+    /// Delete an agent card by ID. Returns `true` if a row was deleted.
     pub fn delete(&self, id: &AgentCardId) -> Result<bool> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let affected = conn.execute(

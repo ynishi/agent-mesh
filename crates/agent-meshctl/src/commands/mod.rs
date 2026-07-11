@@ -1,14 +1,37 @@
+/// `agent-meshctl acl` — manage ACL rules via meshd's Local API.
 pub mod acl;
+/// `agent-meshctl deregister` — delete an agent card, direct to the control
+/// plane (does not revoke the underlying key; see [`revoke`] for that).
 pub mod deregister;
+/// `agent-meshctl discover` — search the registry for peer agent cards,
+/// direct to the control plane.
 pub mod discover;
+/// `agent-meshctl group` — manage groups and their membership via meshd's
+/// Local API.
 pub mod group;
+/// `agent-meshctl keygen` — generate a new Ed25519 identity keypair
+/// (offline, prints to stdout).
 pub mod keygen;
+/// `agent-meshctl login` — OAuth device-flow login direct to the control
+/// plane (no meshd required).
 pub mod login;
+/// `agent-meshctl register` — register an agent card, direct to the control
+/// plane, generating a keypair if none is provided.
 pub mod register;
+/// `agent-meshctl request` — send a capability request to a peer agent
+/// through meshd's Local API.
 pub mod request;
+/// `agent-meshctl revoke` — revoke a peer's key via meshd (blocks the key
+/// and disconnects every card sharing it).
 pub mod revoke;
+/// `agent-meshctl rotate` — rotate this identity's keypair via meshd
+/// (two-phase: initiate, then complete).
 pub mod rotate;
+/// `agent-meshctl setup-key` — manage setup keys used for key-based
+/// registration, via meshd's Local API.
 pub mod setup_key;
+/// `agent-meshctl status` — show local daemon connection/auth status via
+/// meshd's Local API.
 pub mod status;
 
 pub use self::acl::{acl_create, acl_delete, acl_list};

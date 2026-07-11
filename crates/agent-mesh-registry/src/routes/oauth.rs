@@ -12,32 +12,43 @@ use crate::AppState;
 /// Response from GitHub Device Flow initiation.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeviceFlowResponse {
+    /// Code the caller polls `/oauth/token` with.
     pub device_code: String,
+    /// Short code the user enters at `verification_uri`.
     pub user_code: String,
+    /// URL the user visits to approve the device.
     pub verification_uri: String,
+    /// Seconds until `device_code` expires.
     pub expires_in: u64,
+    /// Minimum seconds to wait between polling attempts.
     pub interval: u64,
 }
 
 /// Request body for token exchange.
 #[derive(Debug, Deserialize)]
 pub struct TokenRequest {
+    /// Device code from [`DeviceFlowResponse`].
     pub device_code: String,
 }
 
 /// Successful login response containing the issued API token.
 #[derive(Debug, Serialize)]
 pub struct LoginResponse {
+    /// Plaintext API token — shown only once at issuance.
     pub api_token: String,
+    /// The (possibly newly created) user this token belongs to.
     pub user_id: UserId,
 }
 
 /// Pending/slow-down response forwarded from GitHub.
 #[derive(Debug, Serialize)]
 pub struct PendingResponse {
+    /// GitHub error code (`authorization_pending`, `slow_down`, etc.).
     pub error: String,
+    /// Human-readable error detail, if GitHub provided one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_description: Option<String>,
+    /// Adjusted polling interval, present on `slow_down`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interval: Option<u64>,
 }
@@ -46,7 +57,9 @@ pub struct PendingResponse {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum TokenExchangeResponse {
+    /// Login completed; an API token was issued.
     Success(LoginResponse),
+    /// Not yet authorized, or GitHub asked us to slow down polling.
     Pending(PendingResponse),
 }
 

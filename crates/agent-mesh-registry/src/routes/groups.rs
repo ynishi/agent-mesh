@@ -8,17 +8,24 @@ use serde::Deserialize;
 use crate::auth::AuthUser;
 use crate::AppState;
 
+/// Request body for creating a group.
 #[derive(Deserialize)]
 pub struct CreateGroupRequest {
+    /// Display name for the new group.
     pub name: String,
 }
 
+/// Request body for adding a member to a group.
 #[derive(Deserialize)]
 pub struct AddMemberRequest {
+    /// User to add.
     pub user_id: UserId,
+    /// Role to grant the new member.
     pub role: GroupRole,
 }
 
+/// `POST /groups` — create a group owned by the authenticated user, who is
+/// added as its first member with [`GroupRole::Owner`].
 pub async fn create_group(
     State(state): State<AppState>,
     AuthUser(user_id): AuthUser,
@@ -48,6 +55,7 @@ pub async fn create_group(
     Ok((StatusCode::CREATED, Json(group)))
 }
 
+/// `GET /groups` — list all groups the authenticated user is a member of.
 pub async fn list_groups(
     State(state): State<AppState>,
     AuthUser(user_id): AuthUser,
@@ -59,6 +67,8 @@ pub async fn list_groups(
     Ok(Json(groups))
 }
 
+/// `POST /groups/{id}/members` — add a member to a group. Caller must be an
+/// `Owner` or `Admin` of the group.
 pub async fn add_member(
     State(state): State<AppState>,
     AuthUser(caller_id): AuthUser,
@@ -91,6 +101,9 @@ pub async fn add_member(
     Ok(StatusCode::CREATED)
 }
 
+/// `DELETE /groups/{id}/members/{user_id}` — remove a member from a group.
+/// Caller must be an `Owner` or `Admin`; the group's `Owner` cannot be
+/// removed via this endpoint.
 pub async fn remove_member(
     State(state): State<AppState>,
     AuthUser(caller_id): AuthUser,

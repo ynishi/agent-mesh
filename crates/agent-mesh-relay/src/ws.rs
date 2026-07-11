@@ -13,6 +13,9 @@ use futures_util::SinkExt;
 
 use crate::hub::Hub;
 
+/// `GET /ws` — upgrade to a WebSocket and hand the connection off to
+/// [`handle_connection`], which authenticates the agent and then relays
+/// [`agent_mesh_core::message::MeshEnvelope`] frames via [`Hub`].
 pub async fn ws_handler(ws: WebSocketUpgrade, State(hub): State<Arc<Hub>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_connection(socket, hub))
 }

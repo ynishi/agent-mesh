@@ -28,9 +28,18 @@
 //! it does not link `agent-mesh-sdk`, `agent-mesh-relay`, or
 //! `agent-mesh-registry`; it reaches the registry over plain HTTP
 //! ([`cp_client`]) and meshd over its local HTTP API ([`daemon`]).
+#![warn(missing_docs)]
+
+/// One module per subcommand (`keygen`, `login`, `register`, `deregister`,
+/// `discover`, `request`, `status`, `rotate`, `revoke`, `acl`, `group`,
+/// `setup_key`), each a thin `clap` handler.
 pub mod commands;
 pub mod cp_client;
+/// Locates or spawns a local `agent-meshd` process and talks to it over its
+/// local API.
 pub mod daemon;
+/// MCP adapter (behind the `mcp-server` feature) that exposes mesh
+/// request/reply as MCP tools via `rmcp`.
 #[cfg(feature = "mcp-server")]
 pub mod mcp_server;
 
