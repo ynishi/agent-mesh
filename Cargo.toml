@@ -29,9 +29,11 @@ agent-mesh-core = { path = "crates/agent-mesh-core", version = "0.3.2" }
 agent-mesh-relay = { path = "crates/agent-mesh-relay", version = "0.3.2" }
 agent-mesh-registry = { path = "crates/agent-mesh-registry", version = "0.3.2" }
 agent-mesh-sdk = { path = "crates/agent-mesh-sdk", version = "0.3.2" }
+agent-meshd = { path = "crates/agent-meshd", version = "0.3.2" }
+agent-meshctl = { path = "crates/agent-meshctl", version = "0.3.2" }
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 
 # Web / HTTP
 axum = { version = "0.8", features = ["ws"] }
@@ -82,3 +84,13 @@ schemars = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"
 async-trait = "0.1"
+hex = "0.4"
+
+# HTTP client testing (hyper low-level, non-reqwest paths)
+hyper = { version = "1", features = ["http1", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+
+# Test utilities
+tempfile = "3"
