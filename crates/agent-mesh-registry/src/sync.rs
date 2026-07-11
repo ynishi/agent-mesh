@@ -227,7 +227,7 @@ impl Default for SyncHub {
 /// Query parameters for the `/sync` WebSocket endpoint.
 #[derive(serde::Deserialize)]
 pub struct SyncParams {
-    pub agent_id: String,
+    pub agent_id: AgentId,
 }
 
 /// `GET /sync` — WebSocket endpoint for state synchronization.
@@ -248,7 +248,7 @@ pub async fn ws_handler(
     AuthUser(user_id): AuthUser,
     Query(params): Query<SyncParams>,
 ) -> impl IntoResponse {
-    let agent_id = AgentId::from_raw(params.agent_id);
+    let agent_id = params.agent_id;
 
     // Resolve group_id and verify ownership before upgrading.
     let card_result = state

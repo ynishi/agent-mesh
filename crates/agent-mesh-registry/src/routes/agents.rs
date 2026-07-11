@@ -120,8 +120,11 @@ pub async fn delete_agent(
 }
 
 /// Request body for registering an agent with a Setup Key.
-/// Setup Key verification is done inside the handler (not middleware).
-/// Architecture decision: architecture.md §11.1 — BP: Tailscale/NetBird.
+/// Setup Key verification is done inside the handler (not middleware),
+/// since the caller does not hold a Bearer token yet at this point — the
+/// Setup Key itself is what is being exchanged for one. This mirrors
+/// Tailscale's Auth Key and NetBird's Setup Key, verified inline by the
+/// registration endpoint rather than by a generic auth layer.
 #[derive(Deserialize)]
 pub struct RegisterWithSetupKeyRequest {
     /// Plaintext setup key (e.g. `sk_...`).
@@ -148,9 +151,12 @@ fn generate_raw_api_token() -> String {
 
 /// Register an agent using a plaintext Setup Key.
 ///
-/// Setup Key verification is performed directly in this handler
-/// (architecture.md §11.1). This endpoint lives in the third router layer
-/// (`setup_key_routes`) which has no Bearer auth middleware.
+/// Setup Key verification is performed directly in this handler, because
+/// registration is how the caller *obtains* a Bearer token in the first
+/// place — `require_auth` middleware cannot gate an endpoint that produces
+/// the credential it would check. This endpoint therefore lives in the
+/// third router layer (`setup_key_routes`) which has no Bearer auth
+/// middleware.
 pub async fn register_with_setup_key(
     State(state): State<AppState>,
     Json(req): Json<RegisterWithSetupKeyRequest>,
@@ -359,8 +365,8 @@ pub async fn complete_rotation(
             let caps: Vec<String> = serde_json::from_str(&row.allowed_capabilities)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             Ok(AclRule {
-                source: agent_mesh_core::identity::AgentId::from_raw(row.source),
-                target: agent_mesh_core::identity::AgentId::from_raw(row.target),
+                source: row.source,
+                target: row.target,
                 allowed_capabilities: caps,
             })
         })

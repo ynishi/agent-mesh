@@ -6,7 +6,7 @@ use axum::Json;
 use serde::Serialize;
 
 use agent_mesh_core::agent_card::AgentCardQuery;
-use agent_mesh_core::identity::GroupId;
+use agent_mesh_core::identity::{AgentId, GroupId, UserId};
 use agent_mesh_core::message::KeyRevocation;
 use agent_mesh_core::sync::SyncEvent;
 
@@ -17,9 +17,9 @@ use crate::AppState;
 /// API response for a single revocation record.
 #[derive(Serialize)]
 pub struct RevocationResponse {
-    pub agent_id: String,
+    pub agent_id: AgentId,
     pub reason: Option<String>,
-    pub revoked_by: String,
+    pub revoked_by: UserId,
     pub timestamp: i64,
     pub created_at: String,
 }
@@ -29,7 +29,7 @@ impl From<RevocationRow> for RevocationResponse {
         Self {
             agent_id: row.agent_id,
             reason: row.reason,
-            revoked_by: row.revoked_by.0.to_string(),
+            revoked_by: row.revoked_by,
             timestamp: row.timestamp,
             created_at: row.created_at,
         }
@@ -53,7 +53,7 @@ pub async fn revoke_key(
     })?;
 
     let row = RevocationRow {
-        agent_id: rev.agent_id.as_str().to_string(),
+        agent_id: rev.agent_id.clone(),
         reason: rev.reason.clone(),
         revoked_by: user_id,
         signature: rev.signature.clone(),
@@ -221,7 +221,7 @@ mod tests {
 
         // Insert two revocations directly.
         db.create_revocation(&RevocationRow {
-            agent_id: "agent-rev-a".to_string(),
+            agent_id: AgentId::from_raw("agent-rev-a".to_string()),
             reason: None,
             revoked_by: uid,
             signature: "sig".to_string(),
@@ -230,7 +230,7 @@ mod tests {
         })
         .unwrap();
         db.create_revocation(&RevocationRow {
-            agent_id: "agent-rev-b".to_string(),
+            agent_id: AgentId::from_raw("agent-rev-b".to_string()),
             reason: Some("reason-b".to_string()),
             revoked_by: uid,
             signature: "sig2".to_string(),

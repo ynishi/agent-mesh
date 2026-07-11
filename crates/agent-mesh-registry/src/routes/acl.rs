@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use agent_mesh_core::identity::{AgentId, GroupId};
 use agent_mesh_core::sync::SyncEvent;
 
 use crate::auth::AuthUser;
@@ -12,10 +13,10 @@ use crate::AppState;
 /// Request body for creating an ACL rule.
 #[derive(Deserialize)]
 pub struct CreateAclRuleRequest {
-    /// Source agent ID (string form).
-    pub source: String,
-    /// Target agent ID (string form).
-    pub target: String,
+    /// Source agent ID.
+    pub source: AgentId,
+    /// Target agent ID.
+    pub target: AgentId,
     /// Capabilities the source may invoke on the target.
     pub allowed_capabilities: Vec<String>,
 }
@@ -24,9 +25,9 @@ pub struct CreateAclRuleRequest {
 #[derive(Serialize)]
 pub struct AclRuleResponse {
     pub id: String,
-    pub group_id: String,
-    pub source: String,
-    pub target: String,
+    pub group_id: GroupId,
+    pub source: AgentId,
+    pub target: AgentId,
     pub allowed_capabilities: Vec<String>,
     pub created_at: String,
 }
@@ -38,7 +39,7 @@ impl TryFrom<AclRuleRow> for AclRuleResponse {
         let caps: Vec<String> = serde_json::from_str(&row.allowed_capabilities)?;
         Ok(Self {
             id: row.id,
-            group_id: row.group_id.0.to_string(),
+            group_id: row.group_id,
             source: row.source,
             target: row.target,
             allowed_capabilities: caps,
@@ -252,8 +253,8 @@ mod tests {
         db.create_acl_rule(&AclRuleRow {
             id: uuid::Uuid::new_v4().to_string(),
             group_id: gid1,
-            source: "src-1".to_string(),
-            target: "dst-1".to_string(),
+            source: AgentId::from_raw("src-1".to_string()),
+            target: AgentId::from_raw("dst-1".to_string()),
             allowed_capabilities: r#"["cap1"]"#.to_string(),
             created_by: _uid1,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -289,8 +290,8 @@ mod tests {
         db.create_acl_rule(&AclRuleRow {
             id: rule_id.clone(),
             group_id: gid,
-            source: "s".to_string(),
-            target: "t".to_string(),
+            source: AgentId::from_raw("s".to_string()),
+            target: AgentId::from_raw("t".to_string()),
             allowed_capabilities: r#"[]"#.to_string(),
             created_by: _uid,
             created_at: chrono::Utc::now().to_rfc3339(),

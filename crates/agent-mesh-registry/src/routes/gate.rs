@@ -3,20 +3,22 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use agent_mesh_core::identity::{AgentId, GroupId};
+
 use crate::auth::AuthUser;
 use crate::AppState;
 
 /// Request body for verifying an agent's group membership.
 #[derive(Deserialize)]
 pub struct VerifyAgentRequest {
-    /// Agent ID to look up (string form).
-    pub agent_id: String,
+    /// Agent ID to look up.
+    pub agent_id: AgentId,
 }
 
 /// Response when the agent is found.
 #[derive(Serialize)]
 pub struct VerifyAgentResponse {
-    pub group_id: String,
+    pub group_id: GroupId,
 }
 
 /// `POST /gate/verify` — internal Relay API: verify that an agent_id is registered
@@ -31,13 +33,11 @@ pub async fn verify_agent(
 ) -> Result<Json<VerifyAgentResponse>, (StatusCode, String)> {
     let group_id = state
         .db
-        .get_agent_group_id(&req.agent_id)
+        .get_agent_group_id(req.agent_id.as_str())
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     match group_id {
-        Some(gid) => Ok(Json(VerifyAgentResponse {
-            group_id: gid.0.to_string(),
-        })),
+        Some(gid) => Ok(Json(VerifyAgentResponse { group_id: gid })),
         None => Err((StatusCode::NOT_FOUND, "agent not found".into())),
     }
 }
