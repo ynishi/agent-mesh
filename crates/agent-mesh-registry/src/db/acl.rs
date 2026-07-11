@@ -1,7 +1,7 @@
 //! `acl_rules` table: capability-grant rules between agents, scoped to a
 //! group.
 
-use agent_mesh_core::identity::{AgentId, GroupId, UserId};
+use agent_mesh_core::identity::{AclRuleId, AgentId, GroupId, UserId};
 use anyhow::Result;
 use rusqlite::params;
 
@@ -15,7 +15,7 @@ impl Database {
             "INSERT INTO acl_rules (id, group_id, source, target, allowed_capabilities, created_by, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
-                rule.id,
+                rule.id.as_str(),
                 rule.group_id.0.to_string(),
                 rule.source.as_str(),
                 rule.target.as_str(),
@@ -46,11 +46,11 @@ impl Database {
     /// Delete an ACL rule by id, only if it belongs to the given group.
     ///
     /// Returns `true` if deleted, `false` if not found or not in the group.
-    pub fn delete_acl_rule(&self, id: &str, group_id: &GroupId) -> Result<bool> {
+    pub fn delete_acl_rule(&self, id: &AclRuleId, group_id: &GroupId) -> Result<bool> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let affected = conn.execute(
             "DELETE FROM acl_rules WHERE id = ?1 AND group_id = ?2",
-            params![id, group_id.0.to_string()],
+            params![id.as_str(), group_id.0.to_string()],
         )?;
         Ok(affected > 0)
     }
@@ -60,7 +60,7 @@ impl Database {
 /// Distinct from `agent_mesh_core::acl::AclRule` — this is the persistence layer struct.
 pub struct AclRuleRow {
     /// Rule ID (UUID string).
-    pub id: String,
+    pub id: AclRuleId,
     /// Group the rule is scoped to.
     pub group_id: GroupId,
     /// Agent the rule grants outbound access *from*.
@@ -84,7 +84,7 @@ fn row_to_acl_rule(row: &rusqlite::Row) -> Result<AclRuleRow> {
     let created_by_str: String = row.get(5)?;
     let created_at: String = row.get(6)?;
     Ok(AclRuleRow {
-        id,
+        id: AclRuleId::from_raw(id),
         group_id: GroupId::parse_str(&group_id_str)?,
         source: AgentId::from_raw(source),
         target: AgentId::from_raw(target),

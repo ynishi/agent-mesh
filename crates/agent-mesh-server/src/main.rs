@@ -67,7 +67,7 @@ pub struct InProcessGateVerifier {
 #[async_trait]
 impl GateVerifier for InProcessGateVerifier {
     async fn verify_agent(&self, agent_id: &AgentId) -> anyhow::Result<Option<GroupId>> {
-        match self.db.get_agent_group_id(agent_id.as_str())? {
+        match self.db.get_agent_group_id(agent_id)? {
             Some(gid) => Ok(Some(gid)),
             None => Ok(None),
         }

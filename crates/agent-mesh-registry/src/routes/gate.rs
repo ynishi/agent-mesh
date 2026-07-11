@@ -34,7 +34,7 @@ pub async fn verify_agent(
 ) -> Result<Json<VerifyAgentResponse>, (StatusCode, String)> {
     let group_id = state
         .db
-        .get_agent_group_id(req.agent_id.as_str())
+        .get_agent_group_id(&req.agent_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     match group_id {

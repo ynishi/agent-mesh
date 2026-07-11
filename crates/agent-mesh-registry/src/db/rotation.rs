@@ -23,11 +23,11 @@ pub struct RotationResult {
 }
 
 impl Database {
-    /// Return the group_id for a given agent_id string, or None if not found.
+    /// Return the group_id for a given agent_id, or None if not found.
     ///
     /// Dual-lookup: also matches `pending_agent_id` during the grace period so that
     /// gate verify accepts the new key before rotation completes.
-    pub fn get_agent_group_id(&self, agent_id: &str) -> Result<Option<GroupId>> {
+    pub fn get_agent_group_id(&self, agent_id: &AgentId) -> Result<Option<GroupId>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut stmt = conn.prepare(
             "SELECT group_id FROM agent_cards \
@@ -35,7 +35,7 @@ impl Database {
                 OR (pending_agent_id = ?1 AND rotation_expires_at > datetime('now')) \
              LIMIT 1",
         )?;
-        let mut rows = stmt.query(params![agent_id])?;
+        let mut rows = stmt.query(params![agent_id.as_str()])?;
         match rows.next()? {
             None => Ok(None),
             Some(row) => {

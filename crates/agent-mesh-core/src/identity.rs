@@ -1,5 +1,6 @@
-//! Ed25519 agent identity ([`AgentKeypair`] / [`AgentId`]) and UUID newtypes
-//! for cards, messages, users, and groups.
+//! Ed25519 agent identity ([`AgentKeypair`] / [`AgentId`]), ACL rule IDs
+//! ([`AclRuleId`]), and UUID newtypes for cards, messages, users, and
+//! groups.
 
 use std::fmt;
 
@@ -52,6 +53,34 @@ impl AgentId {
 }
 
 impl fmt::Display for AgentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Newtype wrapper for ACL rule IDs.
+///
+/// Unlike [`AgentCardId`] / [`MessageId`] / [`UserId`] / [`GroupId`], this is
+/// an opaque string (not a parsed [`Uuid`]): callers that generate a new ID
+/// do so externally (e.g. `AclRuleId::from_raw(Uuid::new_v4().to_string())`)
+/// and this type does not validate UUID shape on construction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AclRuleId(String);
+
+impl AclRuleId {
+    /// Create from a raw string (e.g. loaded from the database, or a freshly
+    /// generated UUID string).
+    pub fn from_raw(s: String) -> Self {
+        Self(s)
+    }
+
+    /// Returns the underlying ID as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for AclRuleId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
@@ -279,6 +308,22 @@ mod tests {
         let expected = serde_json::to_string(&uuid).unwrap();
         assert_eq!(json, expected);
         let deserialized: AgentCardId = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, id);
+    }
+
+    #[test]
+    fn acl_rule_id_roundtrip() {
+        let id = AclRuleId::from_raw("test-rule-id".to_string());
+        assert_eq!(id.as_str(), "test-rule-id");
+        assert_eq!(id.to_string(), "test-rule-id");
+    }
+
+    #[test]
+    fn acl_rule_id_serde_transparent() {
+        let id = AclRuleId::from_raw("abc-123".to_string());
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"abc-123\"");
+        let deserialized: AclRuleId = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, id);
     }
 }

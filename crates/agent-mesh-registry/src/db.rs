@@ -149,7 +149,7 @@ impl Database {
 mod tests {
     use super::*;
     use agent_mesh_core::agent_card::{AgentCardQuery, AgentCardRegistration, Capability};
-    use agent_mesh_core::identity::{AgentCardId, AgentId, GroupId, UserId};
+    use agent_mesh_core::identity::{AclRuleId, AgentCardId, AgentId, GroupId, UserId};
     use agent_mesh_core::user::{
         ApiToken, Group, GroupMember, GroupRole, SetupKey, SetupKeyUsage, User,
     };
@@ -1014,7 +1014,7 @@ mod tests {
 
     fn make_acl_rule_row(group_id: GroupId, created_by: UserId) -> AclRuleRow {
         AclRuleRow {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: AclRuleId::from_raw(uuid::Uuid::new_v4().to_string()),
             group_id,
             source: AgentId::from_raw("agent-src".to_string()),
             target: AgentId::from_raw("agent-dst".to_string()),
@@ -1102,7 +1102,12 @@ mod tests {
     fn delete_acl_rule_not_found() {
         let db = test_db();
         let (_user_id, group_id) = ensure_test_user(&db);
-        let deleted = db.delete_acl_rule("nonexistent-id", &group_id).unwrap();
+        let deleted = db
+            .delete_acl_rule(
+                &AclRuleId::from_raw("nonexistent-id".to_string()),
+                &group_id,
+            )
+            .unwrap();
         assert!(!deleted);
     }
 
@@ -1146,13 +1151,17 @@ mod tests {
         let rev = make_revocation_row("agent-to-check", user_id);
         db.create_revocation(&rev).unwrap();
 
-        assert!(db.is_revoked("agent-to-check").unwrap());
+        assert!(db
+            .is_revoked(&AgentId::from_raw("agent-to-check".to_string()))
+            .unwrap());
     }
 
     #[test]
     fn is_revoked_false() {
         let db = test_db();
-        assert!(!db.is_revoked("unknown-agent").unwrap());
+        assert!(!db
+            .is_revoked(&AgentId::from_raw("unknown-agent".to_string()))
+            .unwrap());
     }
 
     #[test]
@@ -1208,14 +1217,18 @@ mod tests {
         )
         .unwrap();
 
-        let found = db.get_agent_group_id("lookup-agent").unwrap();
+        let found = db
+            .get_agent_group_id(&AgentId::from_raw("lookup-agent".to_string()))
+            .unwrap();
         assert_eq!(found, Some(group_id));
     }
 
     #[test]
     fn get_agent_group_id_not_found() {
         let db = test_db();
-        let found = db.get_agent_group_id("ghost-agent").unwrap();
+        let found = db
+            .get_agent_group_id(&AgentId::from_raw("ghost-agent".to_string()))
+            .unwrap();
         assert!(found.is_none());
     }
 
@@ -1242,7 +1255,9 @@ mod tests {
         .unwrap();
 
         // The new agent_id should now be found via dual-lookup.
-        let found = db.get_agent_group_id("new-agent-id").unwrap();
+        let found = db
+            .get_agent_group_id(&AgentId::from_raw("new-agent-id".to_string()))
+            .unwrap();
         assert_eq!(found, Some(group_id));
     }
 
@@ -1315,7 +1330,9 @@ mod tests {
         }
 
         // Expired pending key must NOT be returned.
-        let found = db.get_agent_group_id("expired-new-id").unwrap();
+        let found = db
+            .get_agent_group_id(&AgentId::from_raw("expired-new-id".to_string()))
+            .unwrap();
         assert!(
             found.is_none(),
             "expired pending key should not be returned"

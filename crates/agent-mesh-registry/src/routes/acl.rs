@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use agent_mesh_core::identity::{AgentId, GroupId};
+use agent_mesh_core::identity::{AclRuleId, AgentId, GroupId};
 use agent_mesh_core::sync::SyncEvent;
 
 use crate::auth::AuthUser;
@@ -25,7 +25,7 @@ pub struct CreateAclRuleRequest {
 #[derive(Serialize)]
 pub struct AclRuleResponse {
     /// Rule ID.
-    pub id: String,
+    pub id: AclRuleId,
     /// Group the rule is scoped to.
     pub group_id: GroupId,
     /// Agent the rule grants outbound access *from*.
@@ -69,7 +69,7 @@ pub async fn create_rule(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let row = AclRuleRow {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: AclRuleId::from_raw(uuid::Uuid::new_v4().to_string()),
         group_id,
         source: req.source,
         target: req.target,
@@ -135,7 +135,7 @@ pub async fn delete_rule(
 
     let deleted = state
         .db
-        .delete_acl_rule(&id, &group_id)
+        .delete_acl_rule(&AclRuleId::from_raw(id), &group_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if deleted {
@@ -257,7 +257,7 @@ mod tests {
 
         // Insert a rule for user1's group directly via DB.
         db.create_acl_rule(&AclRuleRow {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: AclRuleId::from_raw(uuid::Uuid::new_v4().to_string()),
             group_id: gid1,
             source: AgentId::from_raw("src-1".to_string()),
             target: AgentId::from_raw("dst-1".to_string()),
@@ -294,7 +294,7 @@ mod tests {
 
         let rule_id = uuid::Uuid::new_v4().to_string();
         db.create_acl_rule(&AclRuleRow {
-            id: rule_id.clone(),
+            id: AclRuleId::from_raw(rule_id.clone()),
             group_id: gid,
             source: AgentId::from_raw("s".to_string()),
             target: AgentId::from_raw("t".to_string()),

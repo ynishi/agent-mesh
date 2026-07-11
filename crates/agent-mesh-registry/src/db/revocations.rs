@@ -41,11 +41,11 @@ impl Database {
     }
 
     /// Returns `true` if the given agent_id has a revocation record.
-    pub fn is_revoked(&self, agent_id: &str) -> Result<bool> {
+    pub fn is_revoked(&self, agent_id: &AgentId) -> Result<bool> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM revocations WHERE agent_id = ?1",
-            params![agent_id],
+            params![agent_id.as_str()],
             |row| row.get(0),
         )?;
         Ok(count > 0)
