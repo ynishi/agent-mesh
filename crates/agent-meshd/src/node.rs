@@ -173,16 +173,18 @@ impl MeshNode {
             return Ok(());
         };
         let agent_id = self.keypair.read().await.agent_id();
-        cp_sync::cp_sync_loop(
-            cp_url,
-            Arc::clone(&self.bearer_token),
-            &agent_id,
-            Arc::clone(&self.acl),
-            Arc::clone(&self.peers),
-            Arc::clone(&self.revoked_keys),
-            Arc::clone(&self.state),
-        )
-        .await
+        // Bundle the individual shared-state Arcs into one handle for
+        // cp_sync::cp_sync_loop. Each field is a clone of the *same*
+        // Arc<RwLock<_>> used elsewhere in MeshNode/LocalApiState, so the
+        // underlying locks (and their semantics) are unchanged.
+        let shared = Arc::new(cp_sync::CpSyncShared {
+            bearer_token: Arc::clone(&self.bearer_token),
+            acl: Arc::clone(&self.acl),
+            peers: Arc::clone(&self.peers),
+            revoked_keys: Arc::clone(&self.revoked_keys),
+            node_state: Arc::clone(&self.state),
+        });
+        cp_sync::cp_sync_loop(cp_url, shared, &agent_id).await
     }
 
     /// Relay reconnect loop. If `relay_url` is empty, waits indefinitely so the

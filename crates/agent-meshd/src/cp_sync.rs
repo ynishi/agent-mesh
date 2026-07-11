@@ -12,6 +12,30 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::node::NodeState;
 
+/// Bundled shared-state handles used throughout the CP Sync loop.
+///
+/// Groups the individual `Arc<RwLock<_>>` handles that used to be threaded
+/// as five separate parameters through every function in this module into a
+/// single handle. Each field keeps the exact same `Arc<RwLock<_>>` type it
+/// had before, so lock granularity, acquisition order, and hold duration are
+/// all unchanged — this only reduces argument count, it does not merge
+/// locks or alter locking semantics. Callers build this by cloning their
+/// existing `Arc<RwLock<_>>` fields (see `MeshNode::cp_sync_loop_wrapper`),
+/// so the underlying locks remain shared with the rest of the daemon
+/// (`local_api`, relay loop, etc.) exactly as before.
+pub struct CpSyncShared {
+    /// Bearer token for CP authentication.
+    pub bearer_token: Arc<RwLock<Option<String>>>,
+    /// ACL policy, replaced wholesale on `FullSync`/`AclUpdated`.
+    pub acl: Arc<RwLock<AclPolicy>>,
+    /// Peer agent cards received from CP Sync.
+    pub peers: Arc<RwLock<Vec<AgentCard>>>,
+    /// Revoked key agent IDs received from CP Sync.
+    pub revoked_keys: Arc<RwLock<HashSet<String>>>,
+    /// Current daemon state (`Started` → `Authenticated` → `Syncing` → `Connected`).
+    pub node_state: Arc<RwLock<NodeState>>,
+}
+
 /// CP Sync WebSocket reconnect loop.
 ///
 /// Runs indefinitely: connects to `cp_url/sync?agent_id=...`, receives
@@ -21,35 +45,20 @@ use crate::node::NodeState;
 /// `Authenticated` before sleeping 3 s and reconnecting.
 pub async fn cp_sync_loop(
     cp_url: &str,
-    bearer_token: Arc<RwLock<Option<String>>>,
+    shared: Arc<CpSyncShared>,
     agent_id: &AgentId,
-    acl: Arc<RwLock<AclPolicy>>,
-    peers: Arc<RwLock<Vec<AgentCard>>>,
-    revoked_keys: Arc<RwLock<HashSet<String>>>,
-    node_state: Arc<RwLock<NodeState>>,
 ) -> anyhow::Result<()> {
     let mut first_no_token = true;
 
     loop {
-        match connect_and_sync(
-            cp_url,
-            &bearer_token,
-            agent_id,
-            &acl,
-            &peers,
-            &revoked_keys,
-            &node_state,
-            &mut first_no_token,
-        )
-        .await
-        {
+        match connect_and_sync(cp_url, &shared, agent_id, &mut first_no_token).await {
             Ok(()) => tracing::info!("CP sync connection closed, reconnecting..."),
             Err(e) => tracing::warn!(error = %e, "CP sync error, reconnecting..."),
         }
 
         // Revert state on CP disconnect: Connected/Syncing → Authenticated.
         {
-            let mut s = node_state.write().await;
+            let mut s = shared.node_state.write().await;
             if *s == NodeState::Connected || *s == NodeState::Syncing {
                 *s = NodeState::Authenticated;
                 tracing::info!("CP sync disconnected, state → Authenticated");
@@ -62,20 +71,15 @@ pub async fn cp_sync_loop(
 
 /// Establish one WS session to the CP sync endpoint and process messages until
 /// the connection closes or an error occurs.
-#[allow(clippy::too_many_arguments)]
 async fn connect_and_sync(
     cp_url: &str,
-    bearer_token: &Arc<RwLock<Option<String>>>,
+    shared: &Arc<CpSyncShared>,
     agent_id: &AgentId,
-    acl: &Arc<RwLock<AclPolicy>>,
-    peers: &Arc<RwLock<Vec<AgentCard>>>,
-    revoked_keys: &Arc<RwLock<HashSet<String>>>,
-    node_state: &Arc<RwLock<NodeState>>,
     first_no_token: &mut bool,
 ) -> anyhow::Result<()> {
     // Read bearer token; retry with info/debug log if absent.
     let token = {
-        let guard = bearer_token.read().await;
+        let guard = shared.bearer_token.read().await;
         match guard.clone() {
             Some(t) => {
                 *first_no_token = true; // reset so next absence logs info again
@@ -112,7 +116,7 @@ async fn connect_and_sync(
 
     // Transition Authenticated → Syncing on successful connection.
     {
-        let mut s = node_state.write().await;
+        let mut s = shared.node_state.write().await;
         if *s == NodeState::Authenticated {
             *s = NodeState::Syncing;
             tracing::info!("CP sync connected, state → Syncing");
@@ -125,7 +129,7 @@ async fn connect_and_sync(
         match msg? {
             Message::Text(text) => match serde_json::from_str::<SyncEvent>(&text) {
                 Ok(event) => {
-                    apply_sync_event(event, acl, peers, revoked_keys).await;
+                    apply_sync_event(event, shared).await;
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "CP sync: failed to parse SyncEvent, skipping");
@@ -144,31 +148,26 @@ async fn connect_and_sync(
 }
 
 /// Apply a single `SyncEvent` to the local state stores.
-async fn apply_sync_event(
-    event: SyncEvent,
-    acl: &Arc<RwLock<AclPolicy>>,
-    peers: &Arc<RwLock<Vec<AgentCard>>>,
-    revoked_keys: &Arc<RwLock<HashSet<String>>>,
-) {
+async fn apply_sync_event(event: SyncEvent, shared: &Arc<CpSyncShared>) {
     match event {
         SyncEvent::FullSync(msg) => {
             tracing::debug!(seq = msg.seq, "CP sync: FullSync received");
 
             // Replace ACL rules.
             {
-                let mut acl_guard = acl.write().await;
+                let mut acl_guard = shared.acl.write().await;
                 acl_guard.rules = msg.acl_rules;
             }
 
             // Replace peers.
             {
-                let mut peers_guard = peers.write().await;
+                let mut peers_guard = shared.peers.write().await;
                 *peers_guard = msg.peers;
             }
 
             // Replace revoked keys.
             {
-                let mut rk_guard = revoked_keys.write().await;
+                let mut rk_guard = shared.revoked_keys.write().await;
                 *rk_guard = msg
                     .revoked_keys
                     .into_iter()
@@ -179,7 +178,7 @@ async fn apply_sync_event(
 
         SyncEvent::PeerAdded(card) => {
             tracing::debug!(agent_id = card.agent_id.as_str(), "CP sync: PeerAdded");
-            let mut peers_guard = peers.write().await;
+            let mut peers_guard = shared.peers.write().await;
             // Replace existing entry if present (same agent_id).
             if let Some(pos) = peers_guard.iter().position(|p| p.agent_id == card.agent_id) {
                 peers_guard[pos] = card;
@@ -190,19 +189,19 @@ async fn apply_sync_event(
 
         SyncEvent::PeerRemoved(agent_id) => {
             tracing::debug!(agent_id = agent_id.as_str(), "CP sync: PeerRemoved");
-            let mut peers_guard = peers.write().await;
+            let mut peers_guard = shared.peers.write().await;
             peers_guard.retain(|p| p.agent_id != agent_id);
         }
 
         SyncEvent::AclUpdated(rules) => {
             tracing::debug!(count = rules.len(), "CP sync: AclUpdated");
-            let mut acl_guard = acl.write().await;
+            let mut acl_guard = shared.acl.write().await;
             acl_guard.rules = rules;
         }
 
         SyncEvent::KeyRevoked(rev) => {
             tracing::debug!(agent_id = rev.agent_id.as_str(), "CP sync: KeyRevoked");
-            let mut rk_guard = revoked_keys.write().await;
+            let mut rk_guard = shared.revoked_keys.write().await;
             rk_guard.insert(rev.agent_id.as_str().to_string());
         }
 
@@ -219,7 +218,7 @@ async fn apply_sync_event(
             );
             // Own rotation is already applied by local_api /rotate/complete.
             // Here we update peers for rotations of other agents in the group.
-            let mut peers_guard = peers.write().await;
+            let mut peers_guard = shared.peers.write().await;
             for card in peers_guard.iter_mut() {
                 if card.agent_id == old_agent_id {
                     card.agent_id = new_agent_id.clone();
@@ -229,7 +228,7 @@ async fn apply_sync_event(
 
         SyncEvent::AgentOnline(agent_id) => {
             tracing::info!(agent_id = agent_id.as_str(), "CP sync: AgentOnline");
-            let mut peers_guard = peers.write().await;
+            let mut peers_guard = shared.peers.write().await;
             if let Some(card) = peers_guard.iter_mut().find(|p| p.agent_id == agent_id) {
                 card.online = Some(true);
             }
@@ -237,7 +236,7 @@ async fn apply_sync_event(
 
         SyncEvent::AgentOffline(agent_id) => {
             tracing::info!(agent_id = agent_id.as_str(), "CP sync: AgentOffline");
-            let mut peers_guard = peers.write().await;
+            let mut peers_guard = shared.peers.write().await;
             if let Some(card) = peers_guard.iter_mut().find(|p| p.agent_id == agent_id) {
                 card.online = Some(false);
             }
@@ -277,16 +276,18 @@ mod tests {
         AgentKeypair::generate().agent_id()
     }
 
-    fn empty_acl() -> Arc<RwLock<AclPolicy>> {
-        Arc::new(RwLock::new(AclPolicy::default()))
-    }
-
-    fn empty_peers() -> Arc<RwLock<Vec<AgentCard>>> {
-        Arc::new(RwLock::new(Vec::new()))
-    }
-
-    fn empty_revoked() -> Arc<RwLock<HashSet<String>>> {
-        Arc::new(RwLock::new(HashSet::new()))
+    /// Builds a `CpSyncShared` bundle with empty/default state, for tests
+    /// that only need `apply_sync_event`'s `acl` / `peers` / `revoked_keys`
+    /// fields. `bearer_token` and `node_state` are unused by these tests but
+    /// must still be populated since `CpSyncShared` bundles all five.
+    fn empty_shared() -> Arc<CpSyncShared> {
+        Arc::new(CpSyncShared {
+            bearer_token: Arc::new(RwLock::new(None)),
+            acl: Arc::new(RwLock::new(AclPolicy::default())),
+            peers: Arc::new(RwLock::new(Vec::new())),
+            revoked_keys: Arc::new(RwLock::new(HashSet::new())),
+            node_state: Arc::new(RwLock::new(NodeState::Started)),
+        })
     }
 
     // ── build_ws_url ──────────────────────────────────────────────────────────
@@ -319,9 +320,7 @@ mod tests {
     async fn full_sync_replaces_state() {
         use agent_mesh_core::acl::AclRule;
 
-        let acl = empty_acl();
-        let peers = empty_peers();
-        let revoked = empty_revoked();
+        let shared = empty_shared();
 
         let src = make_agent_id();
         let tgt = make_agent_id();
@@ -341,18 +340,16 @@ mod tests {
             seq: 1,
         };
 
-        apply_sync_event(SyncEvent::FullSync(msg), &acl, &peers, &revoked).await;
+        apply_sync_event(SyncEvent::FullSync(msg), &shared).await;
 
-        let acl_guard = acl.read().await;
+        let acl_guard = shared.acl.read().await;
         assert_eq!(acl_guard.rules.len(), 1);
         assert_eq!(acl_guard.rules[0].source, src);
     }
 
     #[tokio::test]
     async fn full_sync_replaces_revoked_keys() {
-        let acl = empty_acl();
-        let peers = empty_peers();
-        let revoked = empty_revoked();
+        let shared = empty_shared();
 
         let kp = AgentKeypair::generate();
         let rev = KeyRevocation::new(&kp, None);
@@ -366,9 +363,9 @@ mod tests {
             seq: 2,
         };
 
-        apply_sync_event(SyncEvent::FullSync(msg), &acl, &peers, &revoked).await;
+        apply_sync_event(SyncEvent::FullSync(msg), &shared).await;
 
-        let rk = revoked.read().await;
+        let rk = shared.revoked_keys.read().await;
         assert!(
             rk.contains(&expected_id),
             "revoked key missing: {expected_id}"
@@ -379,9 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn acl_updated_replaces_rules() {
-        let acl = empty_acl();
-        let peers = empty_peers();
-        let revoked = empty_revoked();
+        let shared = empty_shared();
 
         let src = make_agent_id();
         let tgt = make_agent_id();
@@ -391,9 +386,9 @@ mod tests {
             allowed_capabilities: vec!["cap".into()],
         }];
 
-        apply_sync_event(SyncEvent::AclUpdated(rules), &acl, &peers, &revoked).await;
+        apply_sync_event(SyncEvent::AclUpdated(rules), &shared).await;
 
-        let guard = acl.read().await;
+        let guard = shared.acl.read().await;
         assert_eq!(guard.rules.len(), 1);
         assert_eq!(guard.rules[0].source, src);
     }
@@ -402,17 +397,15 @@ mod tests {
 
     #[tokio::test]
     async fn key_revoked_inserts_agent_id() {
-        let acl = empty_acl();
-        let peers = empty_peers();
-        let revoked = empty_revoked();
+        let shared = empty_shared();
 
         let kp = AgentKeypair::generate();
         let rev = KeyRevocation::new(&kp, None);
         let expected_id = kp.agent_id().as_str().to_string();
 
-        apply_sync_event(SyncEvent::KeyRevoked(rev), &acl, &peers, &revoked).await;
+        apply_sync_event(SyncEvent::KeyRevoked(rev), &shared).await;
 
-        let rk = revoked.read().await;
+        let rk = shared.revoked_keys.read().await;
         assert!(rk.contains(&expected_id));
     }
 
@@ -446,9 +439,8 @@ mod tests {
         let mut card = make_agent_card(old_kp.agent_id());
         card.id = card_id;
 
-        let acl = empty_acl();
-        let peers = Arc::new(RwLock::new(vec![card]));
-        let revoked = empty_revoked();
+        let shared = empty_shared();
+        *shared.peers.write().await = vec![card];
 
         apply_sync_event(
             SyncEvent::KeyRotated {
@@ -456,13 +448,11 @@ mod tests {
                 old_agent_id: old_kp.agent_id(),
                 new_agent_id: new_kp.agent_id(),
             },
-            &acl,
-            &peers,
-            &revoked,
+            &shared,
         )
         .await;
 
-        let peers_guard = peers.read().await;
+        let peers_guard = shared.peers.read().await;
         assert_eq!(peers_guard.len(), 1);
         assert_eq!(peers_guard[0].agent_id, new_kp.agent_id());
     }
@@ -479,9 +469,8 @@ mod tests {
         // Unrelated peer that should NOT be updated.
         let unrelated = make_agent_card(peer_kp.agent_id());
 
-        let acl = empty_acl();
-        let peers = Arc::new(RwLock::new(vec![unrelated]));
-        let revoked = empty_revoked();
+        let shared = empty_shared();
+        *shared.peers.write().await = vec![unrelated];
 
         apply_sync_event(
             SyncEvent::KeyRotated {
@@ -489,13 +478,11 @@ mod tests {
                 old_agent_id: old_kp.agent_id(),
                 new_agent_id: new_kp.agent_id(),
             },
-            &acl,
-            &peers,
-            &revoked,
+            &shared,
         )
         .await;
 
-        let peers_guard = peers.read().await;
+        let peers_guard = shared.peers.read().await;
         // Unrelated peer's agent_id must be unchanged.
         assert_eq!(peers_guard[0].agent_id, peer_kp.agent_id());
     }
@@ -557,19 +544,12 @@ mod tests {
         let kp = AgentKeypair::generate();
         let card = make_agent_card(kp.agent_id());
 
-        let acl = empty_acl();
-        let peers = Arc::new(RwLock::new(vec![card]));
-        let revoked = empty_revoked();
+        let shared = empty_shared();
+        *shared.peers.write().await = vec![card];
 
-        apply_sync_event(
-            SyncEvent::AgentOnline(kp.agent_id()),
-            &acl,
-            &peers,
-            &revoked,
-        )
-        .await;
+        apply_sync_event(SyncEvent::AgentOnline(kp.agent_id()), &shared).await;
 
-        let peers_guard = peers.read().await;
+        let peers_guard = shared.peers.read().await;
         assert_eq!(peers_guard[0].online, Some(true));
     }
 
@@ -579,19 +559,12 @@ mod tests {
         let mut card = make_agent_card(kp.agent_id());
         card.online = Some(true);
 
-        let acl = empty_acl();
-        let peers = Arc::new(RwLock::new(vec![card]));
-        let revoked = empty_revoked();
+        let shared = empty_shared();
+        *shared.peers.write().await = vec![card];
 
-        apply_sync_event(
-            SyncEvent::AgentOffline(kp.agent_id()),
-            &acl,
-            &peers,
-            &revoked,
-        )
-        .await;
+        apply_sync_event(SyncEvent::AgentOffline(kp.agent_id()), &shared).await;
 
-        let peers_guard = peers.read().await;
+        let peers_guard = shared.peers.read().await;
         assert_eq!(peers_guard[0].online, Some(false));
     }
 
@@ -601,20 +574,13 @@ mod tests {
         let unknown_kp = AgentKeypair::generate();
         let card = make_agent_card(known_kp.agent_id());
 
-        let acl = empty_acl();
-        let peers = Arc::new(RwLock::new(vec![card]));
-        let revoked = empty_revoked();
+        let shared = empty_shared();
+        *shared.peers.write().await = vec![card];
 
         // Should not panic even when the agent_id is unknown.
-        apply_sync_event(
-            SyncEvent::AgentOnline(unknown_kp.agent_id()),
-            &acl,
-            &peers,
-            &revoked,
-        )
-        .await;
+        apply_sync_event(SyncEvent::AgentOnline(unknown_kp.agent_id()), &shared).await;
 
-        let peers_guard = peers.read().await;
+        let peers_guard = shared.peers.read().await;
         // Known peer remains untouched.
         assert_eq!(peers_guard[0].online, None);
     }
